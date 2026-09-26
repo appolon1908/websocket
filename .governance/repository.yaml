@@ -1,0 +1,8 @@
+repository: websocket
+role: realtime-gateway
+canonical_lane: development
+production_effects: false
+mission_model: repository/area/subarea/mission/atomic-task
+lease_required: true
+supervisor_required: true
+publication_authority: Appolon

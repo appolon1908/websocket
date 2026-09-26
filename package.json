@@ -1,0 +1,1 @@
+{"name":"@codestra/realtime-gateway","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --test","start":"node src/server.js"},"dependencies":{"ws":"^8.18.0"}}
