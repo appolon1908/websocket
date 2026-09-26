@@ -1,5 +1,4 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import {validEvent} from "../src/server.js";
-test("accepts governed namespaces",()=>{assert.equal(validEvent({type:"agent.heartbeat",ts:new Date().toISOString(),payload:{agent_id:"codex-1"}}),true);assert.equal(validEvent({type:"crypto.tick",ts:new Date().toISOString(),payload:{symbol:"BTC-USD"}}),true);});
+import test from "node:test";import assert from "node:assert/strict";import {validEvent,createGateway} from "../src/server.js";
+test("accepts governed namespaces",()=>{assert.equal(validEvent({type:"agent.heartbeat",ts:new Date().toISOString(),payload:{}}),true);assert.equal(validEvent({type:"certification.completed",ts:new Date().toISOString(),payload:{}}),true);});
 test("rejects unknown namespace",()=>assert.equal(validEvent({type:"random",ts:new Date().toISOString(),payload:{}}),false));
+test("http ingest accepts valid event",async()=>{const {server}=createGateway();await new Promise(r=>server.listen(0,"127.0.0.1",r));try{const {port}=server.address();const res=await fetch("http://127.0.0.1:"+port+"/events",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({type:"mission.task.completed",ts:new Date().toISOString(),payload:{task_id:"T1"}})});assert.equal(res.status,202);}finally{server.close();}});
