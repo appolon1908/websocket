@@ -29,6 +29,7 @@ export function createJwtVerifier(env=process.env){
  const issuer=(env.MISSION_CONTROL_JWT_ISSUER||"").replace(/\/$/,"");
  const audience=env.MISSION_CONTROL_JWT_AUDIENCE||"websocket-gateway";
  const allowedAzp=new Set((env.MISSION_CONTROL_ALLOWED_AZP||"mission-control-ui,mission-control-backend").split(",").filter(Boolean));
+ const tenantClaim=env.MISSION_CONTROL_TENANT_CLAIM||"tenant_id";
  let jwks={expires:0,keys:new Map()};
  if(mode==="required"&&!issuer)throw new Error("MISSION_CONTROL_JWT_ISSUER required");
  async function keyFor(kid){
@@ -39,7 +40,7 @@ export function createJwtVerifier(env=process.env){
   const jwk=jwks.keys.get(kid);if(!jwk)throw new Error("unknown_kid");return crypto.createPublicKey({key:jwk,format:"jwk"});
  }
  return async token=>{
-  if(mode==="disabled")return {sub:"local-development",roles:["Administrator"]};
+  if(mode==="disabled")return {sub:"local-development",roles:["Administrator"],tenant_id:null};
   if(!token)throw new Error("missing_bearer_token");
   const parts=token.split(".");if(parts.length!==3)throw new Error("invalid_token");
   const header=jsonPart(parts[0]),claims=jsonPart(parts[1]);if(header.alg!=="RS256")throw new Error("invalid_alg");
@@ -47,8 +48,9 @@ export function createJwtVerifier(env=process.env){
   const now=Math.floor(Date.now()/1000);if(claims.iss!==issuer||!claims.exp||claims.exp<=now||!claims.iat)throw new Error("invalid_claims");
   const aud=Array.isArray(claims.aud)?claims.aud:[claims.aud];if(!aud.includes(audience))throw new Error("invalid_audience");
   if(allowedAzp.size&&!allowedAzp.has(claims.azp))throw new Error("invalid_azp");
+  const tenant=claims[tenantClaim];if(typeof tenant!=="string"||!tenant)throw new Error("tenant_claim_required");
   const rr=claims.realm_access?.roles||[],cr=claims.resource_access?.["mission-control"]?.roles||[];
-  return {sub:claims.sub,roles:[...new Set([...rr,...cr])],claims};
+  return {sub:claims.sub,roles:[...new Set([...rr,...cr])],tenant_id:tenant,claims};
  };
 }
 
@@ -57,16 +59,40 @@ function validPayload(event){
   const p=event.payload;return !!p&&typeof p.agent_id==="string"&&typeof p.task_id==="string"&&SHA.test(p.current_sha||"")&&states.has(p.status)&&Number.isInteger(p.changed_files_count)&&p.changed_files_count>=0;
  }
  if(event.namespace==="mission"&&event.event_type==="state_transition"){
-  const p=event.payload;return !!p&&typeof p.task_id==="string"&&typeof p.previous_state==="string"&&states.has(p.new_state)&&SHA.test(p.target_sha||"")&&typeof p.triggered_by==="string";
+  const p=event.payload;return !!p&&typeof p.task_id==="string"&&states.has(p.previous_state)&&states.has(p.new_state)&&SHA.test(p.target_sha||"")&&typeof p.triggered_by==="string";
+ }
+ if(event.namespace==="mission"&&event.event_type==="task.claimed"){
+  const p=event.payload;return !!p&&typeof p.task_id==="string"&&typeof p.agent_id==="string"&&typeof p.repository==="string";
  }
  if(event.namespace==="certification"&&event.event_type==="evidence_submitted"){
   const p=event.payload;return !!p&&UUID.test(p.certification_id||"")&&typeof p.task_id==="string"&&SHA.test(p.exact_sha||"")&&typeof p.test_pass_rate==="number"&&p.test_pass_rate>=0&&p.test_pass_rate<=100&&typeof p.artifact_url==="string";
  }
- return true;
+ return ["ci.status","repo.state_changed","notification.created","pr.updated","review.updated","testing.result"].includes(event.namespace+"."+event.event_type) && Object.keys(event.payload||{}).length>0;
 }
 
 export function validEvent(event){
  return !!event&&typeof event==="object"&&UUID.test(event.event_id||"")&&Number.isInteger(event.sequence_no)&&event.sequence_no>=1&&allowedNamespaces.has(event.namespace)&&typeof event.event_type==="string"&&event.event_type.length>0&&typeof event.timestamp==="string"&&!Number.isNaN(Date.parse(event.timestamp))&&typeof event.source_service==="string"&&event.source_service.length>0&&event.payload&&typeof event.payload==="object"&&!Array.isArray(event.payload)&&(!event.correlation_id||UUID.test(event.correlation_id))&&(!event.causation_id||UUID.test(event.causation_id))&&validPayload(event);
+}
+
+export function writePermission(event){
+ const key=event.namespace+"."+event.event_type;
+ if(key==="agent.heartbeat")return "agent:heartbeat";
+ if(key.startsWith("mission."))return "mission:write";
+ if(key==="certification.evidence_submitted")return "evidence:submit";
+ if(["ci.status","repo.state_changed","pr.updated","review.updated","testing.result"].includes(key))return "evidence:submit";
+ if(key==="notification.created")return "mission:write";
+ return null;
+}
+export function readPermission(event){
+ if(event.namespace==="agent")return "agent:read";
+ if(event.namespace==="certification")return "evidence:read";
+ if(["ci","repo","pr","review","testing"].includes(event.namespace))return "evidence:read";
+ return "mission:read";
+}
+function authorizedEvent(user,event,mode){
+ const permission=writePermission(event);if(!permission||!allows(user,permission))return false;
+ if(mode==="required"&&event.tenant_id!==user.tenant_id)return false;
+ return true;
 }
 
 class Bucket{
@@ -75,23 +101,24 @@ class Bucket{
 }
 
 export function createGateway({env=process.env}={}){
- let activeSha=env.MISSION_CONTROL_BUILD_SHA||"0".repeat(40);try{activeSha=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim()}catch{}
+ let activeSha=env.MISSION_CONTROL_BUILD_SHA||"";if(!activeSha){try{activeSha=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim()}catch{activeSha="0".repeat(40)}}
  const verifyJwt=createJwtVerifier(env),httpRate=new Bucket(Number(env.MISSION_CONTROL_EVENT_RATE_LIMIT||120)),wsRate=new Bucket(Number(env.MISSION_CONTROL_WS_RATE_LIMIT||240));
  const lastSequence=new Map();
+ const acceptSequence=event=>{const key=(event.tenant_id||"local")+":"+event.source_service+":"+event.namespace,last=lastSequence.get(key)||0;if(event.sequence_no<=last)return false;lastSequence.set(key,event.sequence_no);return true};
  const server=http.createServer(async(req,res)=>{
   if(req.url==="/healthz"){res.writeHead(200,{"content-type":"application/json"});return res.end(JSON.stringify({ok:true,service:"mission-control-realtime",active_sha:activeSha,auth_mode:env.MISSION_CONTROL_AUTH_MODE||"disabled"}));}
   if(req.url==="/events"&&req.method==="POST"){
-   let user;try{user=await verifyJwt(extractToken(req));if(!allows(user,"evidence:submit")&&!allows(user,"mission:write"))throw new Error("forbidden");}catch(e){res.writeHead(e.message==="forbidden"?403:401);return res.end();}
+   let user;try{user=await verifyJwt(extractToken(req));}catch(e){res.writeHead(401);return res.end();}
    const ip=req.socket.remoteAddress||"unknown";if(!httpRate.take(ip)){res.writeHead(429);return res.end();}
-   let body="",oversized=false;req.on("data",c=>{body+=c;if(Buffer.byteLength(body)>1048576){oversized=true;req.destroy();}});
-   req.on("end",()=>{if(oversized)return;let event;try{event=JSON.parse(body);}catch{res.writeHead(400);return res.end();}if(!validEvent(event)){res.writeHead(422);return res.end();}
-    const key=event.source_service+":"+event.namespace,last=lastSequence.get(key)||0;if(event.sequence_no<=last){res.writeHead(409);return res.end();}lastSequence.set(key,event.sequence_no);broadcast(event);res.writeHead(202);res.end();});return;
+   let body="",oversized=false;req.on("data",c=>{if(oversized)return;if(Buffer.byteLength(body)+c.length>1048576){oversized=true;body="";return;}body+=c;});
+   req.on("end",()=>{if(oversized){res.writeHead(422);return res.end();}let event;try{event=JSON.parse(body);}catch{res.writeHead(400);return res.end();}if(!validEvent(event)){res.writeHead(422);return res.end();}if(!authorizedEvent(user,event,(env.MISSION_CONTROL_AUTH_MODE||"disabled").toLowerCase())){res.writeHead(403);return res.end();}
+    if(!acceptSequence(event)){res.writeHead(409);return res.end();}broadcast(event);res.writeHead(202);res.end();});return;
   }
   res.writeHead(404);res.end();
  });
  const wss=new WebSocketServer({server,maxPayload:1048576,verifyClient:(info,cb)=>{verifyJwt(extractToken(info.req)).then(u=>{if(!allows(u,"mission:read")&&!allows(u,"agent:read"))return cb(false,403,"Forbidden");info.req.user=u;cb(true)}).catch(()=>cb(false,401,"Unauthorized"));},handleProtocols:protocols=>protocols.has("mission-control")?"mission-control":false});
- const broadcast=event=>{const encoded=JSON.stringify(event);for(const client of wss.clients){if(client.readyState!==1)continue;if(client.bufferedAmount>1048576){client.close(1013,"backpressure");continue;}client.send(encoded);}};
- wss.on("connection",(socket,req)=>{socket.isAlive=true;socket.user=req.user;socket.on("pong",()=>socket.isAlive=true);socket.on("message",raw=>{if(!wsRate.take(socket.user?.sub||req.socket.remoteAddress||"unknown"))return socket.close(1013,"rate_limited");let event;try{event=JSON.parse(raw.toString());}catch{return socket.close(1007,"invalid_json");}if(!validEvent(event))return socket.close(1007,"invalid_event");if(!allows(socket.user,"evidence:submit")&&!allows(socket.user,"mission:write"))return socket.close(1008,"forbidden");broadcast(event);});});
+ const broadcast=event=>{const encoded=JSON.stringify(event);for(const client of wss.clients){if(client.readyState!==1)continue;if((env.MISSION_CONTROL_AUTH_MODE||"disabled").toLowerCase()==="required"&&client.user?.tenant_id!==event.tenant_id)continue;if(!allows(client.user,readPermission(event)))continue;if(client.bufferedAmount>1048576){client.close(1013,"backpressure");continue;}client.send(encoded);}};
+ wss.on("connection",(socket,req)=>{socket.isAlive=true;socket.user=req.user;socket.on("pong",()=>socket.isAlive=true);socket.on("message",raw=>{if(!wsRate.take(socket.user?.sub||req.socket.remoteAddress||"unknown"))return socket.close(1013,"rate_limited");let event;try{event=JSON.parse(raw.toString());}catch{return socket.close(1007,"invalid_json");}if(!validEvent(event))return socket.close(1007,"invalid_event");if(!authorizedEvent(socket.user,event,(env.MISSION_CONTROL_AUTH_MODE||"disabled").toLowerCase()))return socket.close(1008,"forbidden");if(!acceptSequence(event))return socket.close(1008,"replay");broadcast(event);});});
  const timer=setInterval(()=>{for(const socket of wss.clients){if(!socket.isAlive){socket.terminate();continue;}socket.isAlive=false;socket.ping();}},30000);timer.unref();
  return {server,wss,broadcast};
 }
