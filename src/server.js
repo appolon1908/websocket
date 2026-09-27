@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 
 export const allowedNamespaces=new Set(["agent","mission","ci","repo","notification","pr","review","testing","certification"]);
@@ -74,10 +75,11 @@ class Bucket{
 }
 
 export function createGateway({env=process.env}={}){
+ let activeSha=env.MISSION_CONTROL_BUILD_SHA||"0".repeat(40);try{activeSha=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim()}catch{}
  const verifyJwt=createJwtVerifier(env),httpRate=new Bucket(Number(env.MISSION_CONTROL_EVENT_RATE_LIMIT||120)),wsRate=new Bucket(Number(env.MISSION_CONTROL_WS_RATE_LIMIT||240));
  const lastSequence=new Map();
  const server=http.createServer(async(req,res)=>{
-  if(req.url==="/healthz"){res.writeHead(200,{"content-type":"application/json"});return res.end(JSON.stringify({ok:true,service:"mission-control-realtime",auth_mode:env.MISSION_CONTROL_AUTH_MODE||"disabled"}));}
+  if(req.url==="/healthz"){res.writeHead(200,{"content-type":"application/json"});return res.end(JSON.stringify({ok:true,service:"mission-control-realtime",active_sha:activeSha,auth_mode:env.MISSION_CONTROL_AUTH_MODE||"disabled"}));}
   if(req.url==="/events"&&req.method==="POST"){
    let user;try{user=await verifyJwt(extractToken(req));if(!allows(user,"evidence:submit")&&!allows(user,"mission:write"))throw new Error("forbidden");}catch(e){res.writeHead(e.message==="forbidden"?403:401);return res.end();}
    const ip=req.socket.remoteAddress||"unknown";if(!httpRate.take(ip)){res.writeHead(429);return res.end();}
