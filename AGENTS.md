@@ -1,0 +1,2 @@
+# Realtime Gateway Agent Contract
+Implementation agents receive exactly one atomic task and one governed worktree lease. Review-only work does not satisfy an implementation assignment. Never edit main/master, force-push, reset/stash/delete unknown work, bypass CI, expose /internal or /metrics, or enable production effects. Start from exact fetched SHA and finish with tests, clean state, narrow commit, evidence and handoff. GitHub/CI are code and certification evidence; Agent Brain owns orchestration; Linear mirrors execution planning.
