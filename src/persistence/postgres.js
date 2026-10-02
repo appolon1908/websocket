@@ -51,10 +51,23 @@ export class PostgresEventStore {
         to_regclass('realtime.channels') AS channels,
         to_regclass('realtime.channel_sequences') AS channel_sequences,
         to_regclass('realtime.events') AS events,
-        to_regclass('realtime.api_keys') AS api_keys`,
+        to_regclass('realtime.api_keys') AS api_keys,
+        to_regclass('realtime.applications') AS applications,
+        to_regclass('realtime.connections') AS connections,
+        to_regclass('realtime.rooms') AS rooms,
+        to_regclass('realtime.room_members') AS room_members`,
     );
     const state = result.rows[0] || {};
-    if (!state.channels || !state.channel_sequences || !state.events || !state.api_keys) {
+    if (
+      !state.channels ||
+      !state.channel_sequences ||
+      !state.events ||
+      !state.api_keys ||
+      !state.applications ||
+      !state.connections ||
+      !state.rooms ||
+      !state.room_members
+    ) {
       throw new Error("database_migrations_required");
     }
   }
@@ -268,6 +281,304 @@ export class PostgresEventStore {
       "UPDATE realtime.api_keys SET last_used_at = NOW() WHERE key_id = $1",
       [id],
     );
+  }
+
+  async createApplication({
+    applicationId,
+    name,
+    tenantId,
+    permissions = [],
+    rateLimits = {},
+    allowedOrigins = [],
+  }) {
+    const result = await this.pool.query(
+      `INSERT INTO realtime.applications(
+        application_id, name, tenant_id, permissions, rate_limits, allowed_origins
+      ) VALUES ($1,$2,$3,$4,$5,$6)
+      RETURNING *`,
+      [
+        applicationId,
+        name,
+        tenantId,
+        JSON.stringify(permissions),
+        JSON.stringify(rateLimits),
+        JSON.stringify(allowedOrigins),
+      ],
+    );
+    return this.#application(result.rows[0]);
+  }
+
+  async listApplications(tenantId) {
+    const result = await this.pool.query(
+      `SELECT * FROM realtime.applications
+       WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      [tenantId],
+    );
+    return result.rows.map(row => this.#application(row));
+  }
+
+  async getApplication(applicationId, tenantId) {
+    const result = await this.pool.query(
+      `SELECT * FROM realtime.applications
+       WHERE application_id = $1 AND tenant_id = $2`,
+      [applicationId, tenantId],
+    );
+    return this.#application(result.rows[0]);
+  }
+
+  #application(row) {
+    if (!row) return null;
+    return {
+      application_id: row.application_id,
+      name: row.name,
+      tenant_id: row.tenant_id,
+      status: row.status,
+      permissions: row.permissions || [],
+      rate_limits: row.rate_limits || {},
+      allowed_origins: row.allowed_origins || [],
+      created_at: new Date(row.created_at).toISOString(),
+    };
+  }
+
+  async openConnection({
+    connectionId,
+    principalId,
+    applicationId,
+    tenantId,
+    nodeId = null,
+    remoteAddress = null,
+    userAgent = null,
+  }) {
+    const result = await this.pool.query(
+      `INSERT INTO realtime.connections(
+        connection_id, principal_id, application_id, tenant_id,
+        node_id, remote_address, user_agent
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING *`,
+      [
+        connectionId,
+        principalId,
+        applicationId,
+        tenantId,
+        nodeId,
+        remoteAddress,
+        userAgent,
+      ],
+    );
+    return this.#connection(result.rows[0]);
+  }
+
+  async updateConnection(connectionId, {
+    subscriptions,
+    bytesIn = 0,
+    bytesOut = 0,
+    messagesIn = 0,
+    messagesOut = 0,
+  } = {}) {
+    const result = await this.pool.query(
+      `UPDATE realtime.connections
+       SET last_seen = NOW(),
+           subscriptions = COALESCE($2::jsonb, subscriptions),
+           bytes_in = bytes_in + $3,
+           bytes_out = bytes_out + $4,
+           messages_in = messages_in + $5,
+           messages_out = messages_out + $6
+       WHERE connection_id = $1
+       RETURNING *`,
+      [
+        connectionId,
+        subscriptions ? JSON.stringify(subscriptions) : null,
+        bytesIn,
+        bytesOut,
+        messagesIn,
+        messagesOut,
+      ],
+    );
+    return this.#connection(result.rows[0]);
+  }
+
+  async closeConnection(connectionId) {
+    const result = await this.pool.query(
+      `UPDATE realtime.connections
+       SET status = 'closed',
+           disconnected_at = COALESCE(disconnected_at, NOW()),
+           last_seen = NOW()
+       WHERE connection_id = $1
+       RETURNING connection_id`,
+      [connectionId],
+    );
+    return result.rowCount === 1;
+  }
+
+  async listConnections(tenantId, { activeOnly = false } = {}) {
+    const result = await this.pool.query(
+      `SELECT * FROM realtime.connections
+       WHERE tenant_id = $1
+         AND ($2::boolean = false OR status = 'active')
+       ORDER BY connected_at DESC`,
+      [tenantId, activeOnly],
+    );
+    return result.rows.map(row => this.#connection(row));
+  }
+
+  async getConnection(connectionId, tenantId) {
+    const result = await this.pool.query(
+      `SELECT * FROM realtime.connections
+       WHERE connection_id = $1 AND tenant_id = $2`,
+      [connectionId, tenantId],
+    );
+    return this.#connection(result.rows[0]);
+  }
+
+  async listPresence(channel, tenantId) {
+    const result = await this.pool.query(
+      `SELECT connection_id, principal_id, application_id, connected_at, last_seen
+       FROM realtime.connections
+       WHERE tenant_id = $1
+         AND status = 'active'
+         AND subscriptions ? $2
+       ORDER BY connected_at ASC`,
+      [tenantId, channel],
+    );
+    return result.rows.map(row => ({
+      connection_id: row.connection_id,
+      principal_id: row.principal_id,
+      application_id: row.application_id,
+      connected_at: new Date(row.connected_at).toISOString(),
+      last_seen: new Date(row.last_seen).toISOString(),
+    }));
+  }
+
+  #connection(row) {
+    if (!row) return null;
+    return {
+      connection_id: row.connection_id,
+      principal_id: row.principal_id,
+      application_id: row.application_id,
+      tenant_id: row.tenant_id,
+      node_id: row.node_id,
+      connected_at: new Date(row.connected_at).toISOString(),
+      last_seen: new Date(row.last_seen).toISOString(),
+      disconnected_at: row.disconnected_at
+        ? new Date(row.disconnected_at).toISOString()
+        : null,
+      status: row.status,
+      remote_address: row.remote_address,
+      user_agent: row.user_agent,
+      subscriptions: row.subscriptions || [],
+      bytes_in: Number(row.bytes_in || 0),
+      bytes_out: Number(row.bytes_out || 0),
+      messages_in: Number(row.messages_in || 0),
+      messages_out: Number(row.messages_out || 0),
+    };
+  }
+
+  async createRoom({ roomId, tenantId, name, type, createdBy, channel }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO realtime.channels(name, tenant_id, retention)
+         VALUES ($1, $2, '24h')`,
+        [channel, tenantId],
+      );
+      await client.query(
+        "INSERT INTO realtime.channel_sequences(channel, last_sequence) VALUES ($1, 0)",
+        [channel],
+      );
+      const result = await client.query(
+        `INSERT INTO realtime.rooms(
+          room_id, tenant_id, name, type, channel, created_by
+        ) VALUES ($1,$2,$3,$4,$5,$6)
+        RETURNING *`,
+        [roomId, tenantId, name, type, channel, createdBy],
+      );
+      await client.query("COMMIT");
+      return this.#room(result.rows[0], []);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getRoom(roomId, tenantId) {
+    const result = await this.pool.query(
+      `SELECT r.*,
+        COALESCE(
+          jsonb_agg(m.principal_id) FILTER (WHERE m.principal_id IS NOT NULL),
+          '[]'::jsonb
+        ) AS members
+       FROM realtime.rooms r
+       LEFT JOIN realtime.room_members m ON m.room_id = r.room_id
+       WHERE r.room_id = $1 AND r.tenant_id = $2
+       GROUP BY r.room_id`,
+      [roomId, tenantId],
+    );
+    return this.#room(result.rows[0], result.rows[0]?.members || []);
+  }
+
+  async deleteRoom(roomId, tenantId) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        "SELECT channel FROM realtime.rooms WHERE room_id = $1 AND tenant_id = $2 FOR UPDATE",
+        [roomId, tenantId],
+      );
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query("DELETE FROM realtime.rooms WHERE room_id = $1", [roomId]);
+      await client.query("DELETE FROM realtime.channels WHERE name = $1", [
+        existing.rows[0].channel,
+      ]);
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async joinRoom(roomId, tenantId, principalId) {
+    const room = await this.getRoom(roomId, tenantId);
+    if (!room) return null;
+    await this.pool.query(
+      `INSERT INTO realtime.room_members(room_id, principal_id)
+       VALUES ($1,$2)
+       ON CONFLICT (room_id, principal_id) DO NOTHING`,
+      [roomId, principalId],
+    );
+    return this.getRoom(roomId, tenantId);
+  }
+
+  async leaveRoom(roomId, tenantId, principalId) {
+    const room = await this.getRoom(roomId, tenantId);
+    if (!room) return null;
+    await this.pool.query(
+      "DELETE FROM realtime.room_members WHERE room_id = $1 AND principal_id = $2",
+      [roomId, principalId],
+    );
+    return this.getRoom(roomId, tenantId);
+  }
+
+  #room(row, members = []) {
+    if (!row) return null;
+    return {
+      room_id: row.room_id,
+      tenant_id: row.tenant_id,
+      name: row.name,
+      type: row.type,
+      channel: row.channel,
+      created_by: row.created_by,
+      created_at: new Date(row.created_at).toISOString(),
+      members: Array.isArray(members) ? members : [],
+    };
   }
 
   async close() {

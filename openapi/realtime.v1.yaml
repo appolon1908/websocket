@@ -220,6 +220,191 @@
             }
           }
         ]
+      },
+      "Application": {
+        "type": "object",
+        "required": [
+          "application_id",
+          "name",
+          "tenant_id",
+          "status",
+          "permissions",
+          "rate_limits",
+          "allowed_origins",
+          "created_at"
+        ],
+        "properties": {
+          "application_id": {
+            "type": "string",
+            "pattern": "^app_[a-f0-9]{24}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rate_limits": {
+            "type": "object"
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "principal_id",
+          "tenant_id",
+          "connected_at",
+          "last_seen",
+          "status",
+          "subscriptions"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "application_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "connected_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "disconnected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "remote_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bytes_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_out": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "messages_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "messages_out": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "Room": {
+        "type": "object",
+        "required": [
+          "room_id",
+          "tenant_id",
+          "name",
+          "type",
+          "channel",
+          "created_by",
+          "created_at",
+          "members"
+        ],
+        "properties": {
+          "room_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "voice",
+              "video",
+              "collaboration"
+            ]
+          },
+          "channel": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       }
     }
   },
@@ -625,6 +810,330 @@
           },
           "422": {
             "description": "Invalid legacy event"
+          }
+        }
+      }
+    },
+    "/v1/applications": {
+      "get": {
+        "summary": "List applications",
+        "responses": {
+          "200": {
+            "description": "Applications"
+          }
+        }
+      },
+      "post": {
+        "summary": "Register application",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rate_limits": {
+                    "type": "object"
+                  },
+                  "allowed_origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Application registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Application"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/applications/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^app_[a-f0-9]{24}$"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get application",
+        "responses": {
+          "200": {
+            "description": "Application",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Application"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/connections": {
+      "get": {
+        "summary": "List connections",
+        "parameters": [
+          {
+            "name": "active",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connections"
+          }
+        }
+      }
+    },
+    "/v1/connections/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get connection",
+        "responses": {
+          "200": {
+            "description": "Connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Terminate connection",
+        "responses": {
+          "204": {
+            "description": "Terminated"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/presence/{channel}": {
+      "parameters": [
+        {
+          "name": "channel",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get channel presence",
+        "responses": {
+          "200": {
+            "description": "Active channel presence"
+          },
+          "404": {
+            "description": "Channel not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms": {
+      "post": {
+        "summary": "Create room",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "type"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "chat",
+                      "voice",
+                      "video",
+                      "collaboration"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Room created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rooms/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get room",
+        "responses": {
+          "200": {
+            "description": "Room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete room",
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms/{id}/join": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Join room",
+        "responses": {
+          "200": {
+            "description": "Room membership updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms/{id}/leave": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Leave room",
+        "responses": {
+          "200": {
+            "description": "Room membership updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }

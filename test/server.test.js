@@ -372,6 +372,101 @@ test("standalone API-key mode issues, authenticates, rotates, and revokes keys",
   }
 });
 
+test("applications, connections, presence, and rooms form a standalone collaboration flow", async () => {
+  await withServer(async port => {
+    let response = await fetch(`http://127.0.0.1:${port}/v1/applications`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Camera Dashboard",
+        permissions: ["channel:read", "channel:subscribe"],
+        allowed_origins: ["https://camera.example.test"],
+        rate_limits: { connections: 25 },
+      }),
+    });
+    assert.equal(response.status, 201);
+    const application = await response.json();
+    assert.match(application.application_id, /^app_[a-f0-9]{24}$/);
+    assert.equal(application.tenant_id, "local");
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/applications/${application.application_id}`,
+    );
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).name, "Camera Dashboard");
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/rooms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Front Door", type: "video" }),
+    });
+    assert.equal(response.status, 201);
+    const room = await response.json();
+    assert.match(room.room_id, /^[0-9a-f-]{36}$/);
+    assert.equal(room.channel, `tenant/local/rooms/${room.room_id}`);
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/rooms/${room.room_id}/join`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).members, ["local-development"]);
+
+    const { ws, received } = await openSocket(port);
+    await waitUntil(() => received.some(message => message.op === "connected"));
+    const connected = received.find(message => message.op === "connected");
+    ws.send(JSON.stringify({ op: "subscribe", channel: room.channel }));
+    await waitUntil(() => received.some(message => message.op === "subscribed"));
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/presence/${encodeURIComponent(room.channel)}`,
+    );
+    assert.equal(response.status, 200);
+    const presence = await response.json();
+    assert.equal(presence.count, 1);
+    assert.equal(presence.items[0].connection_id, connected.connection_id);
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/connections?active=true`,
+    );
+    assert.equal(response.status, 200);
+    const connections = await response.json();
+    const connection = connections.items.find(
+      item => item.connection_id === connected.connection_id,
+    );
+    assert.ok(connection);
+    assert.deepEqual(connection.subscriptions, [room.channel]);
+    assert.ok(connection.messages_in >= 1);
+
+    const closed = new Promise(resolve => ws.once("close", resolve));
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/connections/${connected.connection_id}`,
+      { method: "DELETE" },
+    );
+    assert.equal(response.status, 204);
+    await closed;
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/presence/${encodeURIComponent(room.channel)}`,
+    );
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).count, 0);
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/rooms/${room.room_id}/leave`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).members, []);
+
+    response = await fetch(
+      `http://127.0.0.1:${port}/v1/rooms/${room.room_id}`,
+      { method: "DELETE" },
+    );
+    assert.equal(response.status, 204);
+  });
+});
+
 test("legacy http ingest remains compatible and rejects replay", () =>
   withServer(async port => {
     const event = base();

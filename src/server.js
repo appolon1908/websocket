@@ -654,11 +654,13 @@ export function createGateway({
             websocket: true,
             events: true,
             channels: true,
-            presence: false,
+            presence: true,
+            applications: true,
+            connections: true,
             replay: true,
             durable_replay: Boolean(eventStore.durable),
             multi_node_fanout: Boolean(broker.durable),
-            rooms: false,
+            rooms: true,
             webrtc: false,
             recording: false,
             broker: broker.kind,
@@ -679,6 +681,239 @@ export function createGateway({
     const ip = req.socket.remoteAddress || "unknown";
     if (!httpRate.take(ip)) {
       return sendError(res, 429, "rate_limited", "Too many requests.", requestId);
+    }
+
+    if (path === "/v1/applications" && req.method === "GET") {
+      if (!allows(user, "admin:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const items = await eventStore.listApplications(user.tenant_id);
+      return sendJson(res, 200, { items }, requestId);
+    }
+
+    if (path === "/v1/applications" && req.method === "POST") {
+      if (!allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      let body;
+      try {
+        body = await readBody(req, Number(env.REALTIME_HTTP_BODY_MAX || 1048576));
+      } catch (error) {
+        return sendError(
+          res,
+          error.status || 400,
+          error.message,
+          error.message === "invalid_json" ? "Invalid JSON." : "Request body is too large.",
+          requestId,
+        );
+      }
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 128) {
+        return sendError(res, 422, "invalid_application", "Application name is invalid.", requestId);
+      }
+      const permissions = body.permissions === undefined ? [] : body.permissions;
+      if (
+        !Array.isArray(permissions) ||
+        permissions.length > 100 ||
+        !permissions.every(
+          permission =>
+            typeof permission === "string" &&
+            (permission === "*" || API_KEY_PERMISSIONS.has(permission)),
+        )
+      ) {
+        return sendError(
+          res,
+          422,
+          "invalid_permissions",
+          "Application permissions are invalid.",
+          requestId,
+        );
+      }
+      const allowedOrigins = body.allowed_origins === undefined ? [] : body.allowed_origins;
+      if (
+        !Array.isArray(allowedOrigins) ||
+        allowedOrigins.length > 100 ||
+        !allowedOrigins.every(origin => typeof origin === "string" && origin.length <= 512)
+      ) {
+        return sendError(
+          res,
+          422,
+          "invalid_origins",
+          "Application allowed origins are invalid.",
+          requestId,
+        );
+      }
+      const rateLimits =
+        body.rate_limits && typeof body.rate_limits === "object" && !Array.isArray(body.rate_limits)
+          ? body.rate_limits
+          : {};
+      const applicationId = "app_" + crypto.randomBytes(12).toString("hex");
+      try {
+        const application = await eventStore.createApplication({
+          applicationId,
+          name: body.name.trim(),
+          tenantId: user.tenant_id,
+          permissions: [...new Set(permissions)],
+          rateLimits,
+          allowedOrigins: [...new Set(allowedOrigins)],
+        });
+        return sendJson(res, 201, application, requestId);
+      } catch {
+        return sendError(
+          res,
+          503,
+          "persistence_unavailable",
+          "Application persistence is unavailable.",
+          requestId,
+        );
+      }
+    }
+
+    const applicationMatch = path.match(/^\/v1\/applications\/(app_[a-f0-9]{24})$/);
+    if (applicationMatch && req.method === "GET") {
+      if (!allows(user, "admin:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const application = await eventStore.getApplication(applicationMatch[1], user.tenant_id);
+      if (!application) {
+        return sendError(res, 404, "not_found", "Application not found.", requestId);
+      }
+      return sendJson(res, 200, application, requestId);
+    }
+
+    if (path === "/v1/connections" && req.method === "GET") {
+      if (!allows(user, "admin:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const activeOnly = url.searchParams.get("active") === "true";
+      const items = await eventStore.listConnections(user.tenant_id, { activeOnly });
+      return sendJson(res, 200, { items }, requestId);
+    }
+
+    const connectionMatch = path.match(/^\/v1\/connections\/([0-9a-f-]{36})$/i);
+    if (connectionMatch && req.method === "GET") {
+      if (!allows(user, "admin:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const connection = await eventStore.getConnection(connectionMatch[1], user.tenant_id);
+      if (!connection) {
+        return sendError(res, 404, "not_found", "Connection not found.", requestId);
+      }
+      return sendJson(res, 200, connection, requestId);
+    }
+
+    if (connectionMatch && req.method === "DELETE") {
+      if (!allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const connection = await eventStore.getConnection(connectionMatch[1], user.tenant_id);
+      if (!connection) {
+        return sendError(res, 404, "not_found", "Connection not found.", requestId);
+      }
+      for (const client of wss.clients) {
+        if (client.connectionId === connection.connection_id) {
+          client.close(1008, "connection_terminated");
+        }
+      }
+      await eventStore.closeConnection(connection.connection_id);
+      res.writeHead(204, { "x-request-id": requestId });
+      return res.end();
+    }
+
+    const presenceMatch = path.match(/^\/v1\/presence\/(.+)$/);
+    if (presenceMatch && req.method === "GET") {
+      const channel = decodeURIComponent(presenceMatch[1]);
+      if (!authorizeChannel(user, channel, "channel:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const exists = await eventStore.getChannel(channel);
+      if (!exists) return sendError(res, 404, "not_found", "Channel not found.", requestId);
+      const items = await eventStore.listPresence(channel, user.tenant_id);
+      return sendJson(res, 200, { channel, count: items.length, items }, requestId);
+    }
+
+    if (path === "/v1/rooms" && req.method === "POST") {
+      if (!allows(user, "room:create")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      let body;
+      try {
+        body = await readBody(req, Number(env.REALTIME_HTTP_BODY_MAX || 1048576));
+      } catch (error) {
+        return sendError(
+          res,
+          error.status || 400,
+          error.message,
+          error.message === "invalid_json" ? "Invalid JSON." : "Request body is too large.",
+          requestId,
+        );
+      }
+      const allowedTypes = new Set(["chat", "voice", "video", "collaboration"]);
+      if (
+        typeof body.name !== "string" ||
+        !body.name.trim() ||
+        body.name.length > 128 ||
+        !allowedTypes.has(body.type)
+      ) {
+        return sendError(res, 422, "invalid_room", "Room definition is invalid.", requestId);
+      }
+      const roomId = crypto.randomUUID();
+      const channel = `tenant/${user.tenant_id}/rooms/${roomId}`;
+      try {
+        const room = await eventStore.createRoom({
+          roomId,
+          tenantId: user.tenant_id,
+          name: body.name.trim(),
+          type: body.type,
+          createdBy: user.sub,
+          channel,
+        });
+        return sendJson(res, 201, room, requestId);
+      } catch {
+        return sendError(
+          res,
+          503,
+          "persistence_unavailable",
+          "Room persistence is unavailable.",
+          requestId,
+        );
+      }
+    }
+
+    const roomActionMatch = path.match(
+      /^\/v1\/rooms\/([0-9a-f-]{36})\/(join|leave)$/i,
+    );
+    if (roomActionMatch && req.method === "POST") {
+      if (!allows(user, "room:join")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const method = roomActionMatch[2] === "join" ? "joinRoom" : "leaveRoom";
+      const room = await eventStore[method](
+        roomActionMatch[1],
+        user.tenant_id,
+        user.sub,
+      );
+      if (!room) return sendError(res, 404, "not_found", "Room not found.", requestId);
+      return sendJson(res, 200, room, requestId);
+    }
+
+    const roomMatch = path.match(/^\/v1\/rooms\/([0-9a-f-]{36})$/i);
+    if (roomMatch && req.method === "GET") {
+      if (!allows(user, "room:join") && !allows(user, "room:create")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const room = await eventStore.getRoom(roomMatch[1], user.tenant_id);
+      if (!room) return sendError(res, 404, "not_found", "Room not found.", requestId);
+      return sendJson(res, 200, room, requestId);
+    }
+
+    if (roomMatch && req.method === "DELETE") {
+      if (!allows(user, "room:create") && !allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const deleted = await eventStore.deleteRoom(roomMatch[1], user.tenant_id);
+      if (!deleted) return sendError(res, 404, "not_found", "Room not found.", requestId);
+      res.writeHead(204, { "x-request-id": requestId });
+      return res.end();
     }
 
     if (path === "/v1/api-keys" && req.method === "GET") {
@@ -992,26 +1227,65 @@ export function createGateway({
           : false,
   });
 
-  const sendWsError = (socket, code, message) =>
-    socket.send(JSON.stringify({ op: "error", error: { code, message } }));
+  const sendSocket = (socket, payload) => {
+    if (socket.readyState !== 1) return false;
+    const encoded = JSON.stringify(payload);
+    socket.send(encoded);
+    if (socket.connectionId) {
+      eventStore
+        .updateConnection(socket.connectionId, {
+          bytesOut: Buffer.byteLength(encoded),
+          messagesOut: 1,
+        })
+        .catch(() => {});
+    }
+    return true;
+  };
 
-  wss.on("connection", (socket, req) => {
+  const sendWsError = (socket, code, message) =>
+    sendSocket(socket, { op: "error", error: { code, message } });
+
+  wss.on("connection", async (socket, req) => {
     socket.isAlive = true;
     socket.user = req.user;
     socket.subscriptions = new Set();
+    socket.connectionId = crypto.randomUUID();
+
+    try {
+      await eventStore.openConnection({
+        connectionId: socket.connectionId,
+        principalId: socket.user.sub,
+        applicationId: socket.user.application_id || null,
+        tenantId: socket.user.tenant_id,
+        nodeId: env.REALTIME_NODE_ID || null,
+        remoteAddress: req.socket.remoteAddress || null,
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 512) || null,
+      });
+    } catch {
+      socket.close(1011, "connection_persistence_failed");
+      return;
+    }
+
     socket.on("pong", () => {
       socket.isAlive = true;
+      eventStore.updateConnection(socket.connectionId).catch(() => {});
     });
-    socket.send(
-      JSON.stringify({
-        op: "connected",
-        connection_id: crypto.randomUUID(),
-        protocol: socket.protocol || REALTIME_PROTOCOL,
-        node_id: env.REALTIME_NODE_ID || null,
-      }),
-    );
+
+    sendSocket(socket, {
+      op: "connected",
+      connection_id: socket.connectionId,
+      protocol: socket.protocol || REALTIME_PROTOCOL,
+      node_id: env.REALTIME_NODE_ID || null,
+    });
 
     socket.on("message", async raw => {
+      eventStore
+        .updateConnection(socket.connectionId, {
+          bytesIn: raw.length ?? Buffer.byteLength(raw.toString()),
+          messagesIn: 1,
+        })
+        .catch(() => {});
+
       if (!wsRate.take(socket.user?.sub || req.socket.remoteAddress || "unknown")) {
         return socket.close(1013, "rate_limited");
       }
@@ -1025,7 +1299,7 @@ export function createGateway({
 
       try {
         if (msg?.op === "ping") {
-          return socket.send(JSON.stringify({ op: "pong", timestamp: new Date().toISOString() }));
+          return sendSocket(socket, { op: "pong", timestamp: new Date().toISOString() });
         }
 
         if (msg?.op === "subscribe") {
@@ -1040,15 +1314,21 @@ export function createGateway({
           if (!socket.subscriptions.has(msg.channel)) {
             await retainBrokerSubscription(msg.channel);
             socket.subscriptions.add(msg.channel);
+            await eventStore.updateConnection(socket.connectionId, {
+              subscriptions: [...socket.subscriptions],
+            });
           }
-          return socket.send(JSON.stringify({ op: "subscribed", channel: msg.channel }));
+          return sendSocket(socket, { op: "subscribed", channel: msg.channel });
         }
 
         if (msg?.op === "unsubscribe") {
           if (socket.subscriptions.delete(msg.channel)) {
             await releaseBrokerSubscription(msg.channel);
+            await eventStore.updateConnection(socket.connectionId, {
+              subscriptions: [...socket.subscriptions],
+            });
           }
-          return socket.send(JSON.stringify({ op: "unsubscribed", channel: msg.channel }));
+          return sendSocket(socket, { op: "unsubscribed", channel: msg.channel });
         }
 
         if (msg?.op === "resume") {
@@ -1066,23 +1346,24 @@ export function createGateway({
           if (!socket.subscriptions.has(msg.channel)) {
             await retainBrokerSubscription(msg.channel);
             socket.subscriptions.add(msg.channel);
+            await eventStore.updateConnection(socket.connectionId, {
+              subscriptions: [...socket.subscriptions],
+            });
           }
           const replay = await eventStore.listEvents(msg.channel, {
             after,
             limit: Math.min(Number(env.REALTIME_REPLAY_MAX_EVENTS || 1000), 5000),
           });
           for (const event of replay.items) {
-            socket.send(JSON.stringify({ op: "event", event, replay: true }));
+            sendSocket(socket, { op: "event", event, replay: true });
           }
-          return socket.send(
-            JSON.stringify({
-              op: "resumed",
-              channel: msg.channel,
-              after,
-              replayed: replay.items.length,
-              next_cursor: replay.next_cursor,
-            }),
-          );
+          return sendSocket(socket, {
+            op: "resumed",
+            channel: msg.channel,
+            after,
+            replayed: replay.items.length,
+            next_cursor: replay.next_cursor,
+          });
         }
 
         if (msg?.op === "ack") {
@@ -1090,7 +1371,7 @@ export function createGateway({
             return sendWsError(socket, "invalid_ack", "Acknowledgement is invalid.");
           }
           await broker.ack(msg.event_id);
-          return socket.send(JSON.stringify({ op: "acked", event_id: msg.event_id }));
+          return sendSocket(socket, { op: "acked", event_id: msg.event_id });
         }
 
         if (msg?.op === "publish") {
@@ -1109,9 +1390,11 @@ export function createGateway({
               },
               socket.user,
             );
-            return socket.send(
-              JSON.stringify({ op: "published", event_id: event.id, sequence: event.sequence }),
-            );
+            return sendSocket(socket, {
+              op: "published",
+              event_id: event.id,
+              sequence: event.sequence,
+            });
           } catch (error) {
             if (error.code === "channel_not_found") {
               return sendWsError(socket, "channel_not_found", "Channel not found.");
@@ -1143,6 +1426,7 @@ export function createGateway({
         releaseBrokerSubscription(channel).catch(() => {});
       }
       socket.subscriptions.clear();
+      eventStore.closeConnection(socket.connectionId).catch(() => {});
     });
   });
 

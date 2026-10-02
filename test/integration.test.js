@@ -66,32 +66,59 @@ async function openSocket(port) {
 }
 
 test(
-  "PostgreSQL + NATS provide durable restart replay and cross-node fanout",
+  "PostgreSQL + NATS provide durable platform state, restart replay, presence, and cross-node fanout",
   { skip: !enabled, timeout: 30000 },
   async () => {
     const suffix = crypto.randomBytes(6).toString("hex");
-    const channel = `tenant/${tenant}/integration-${suffix}`;
     const node1 = await startNode("integration-node-1");
     const node2 = await startNode("integration-node-2");
 
+    let room;
     let published;
+    let connectionId;
     try {
-      let response = await fetch(`http://127.0.0.1:${node1.port}/v1/channels`, {
+      let response = await fetch(`http://127.0.0.1:${node1.port}/v1/applications`, {
         method: "POST",
         headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ name: channel }),
+        body: JSON.stringify({
+          name: `Integration App ${suffix}`,
+          permissions: ["channel:read", "channel:subscribe"],
+          allowed_origins: ["https://integration.example.test"],
+        }),
       });
       assert.equal(response.status, 201);
+      const application = await response.json();
+      assert.match(application.application_id, /^app_[a-f0-9]{24}$/);
+
+      response = await fetch(`http://127.0.0.1:${node1.port}/v1/rooms`, {
+        method: "POST",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ name: `Integration Room ${suffix}`, type: "video" }),
+      });
+      assert.equal(response.status, 201);
+      room = await response.json();
+      assert.equal(room.tenant_id, tenant);
 
       const { ws, received } = await openSocket(node2.port);
-      ws.send(JSON.stringify({ op: "subscribe", channel }));
+      await waitUntil(() => received.some(message => message.op === "connected"));
+      connectionId = received.find(message => message.op === "connected").connection_id;
+      ws.send(JSON.stringify({ op: "subscribe", channel: room.channel }));
       await waitUntil(() => received.some(message => message.op === "subscribed"));
+
+      response = await fetch(
+        `http://127.0.0.1:${node1.port}/v1/presence/${encodeURIComponent(room.channel)}`,
+        { headers: authHeaders() },
+      );
+      assert.equal(response.status, 200);
+      const presence = await response.json();
+      assert.equal(presence.count, 1);
+      assert.equal(presence.items[0].connection_id, connectionId);
 
       response = await fetch(`http://127.0.0.1:${node1.port}/v1/events`, {
         method: "POST",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
-          channel,
+          channel: room.channel,
           type: "integration.cross-node",
           data: { source: "node-1" },
         }),
@@ -107,6 +134,15 @@ test(
             message.event.data.source === "node-1",
         ),
       );
+
+      response = await fetch(
+        `http://127.0.0.1:${node1.port}/v1/connections/${connectionId}`,
+        { headers: authHeaders() },
+      );
+      assert.equal(response.status, 200);
+      const connection = await response.json();
+      assert.equal(connection.node_id, "integration-node-2");
+      assert.deepEqual(connection.subscriptions, [room.channel]);
       ws.close();
     } finally {
       await node1.close();
@@ -115,18 +151,28 @@ test(
 
     const restarted = await startNode("integration-node-restarted");
     try {
+      let response = await fetch(
+        `http://127.0.0.1:${restarted.port}/v1/rooms/${room.room_id}`,
+        { headers: authHeaders() },
+      );
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).channel, room.channel);
+
       const { ws, received } = await openSocket(restarted.port);
-      ws.send(JSON.stringify({ op: "resume", channel, after: 0 }));
+      ws.send(JSON.stringify({ op: "resume", channel: room.channel, after: 0 }));
       await waitUntil(() => received.some(message => message.op === "resumed"));
       const replay = received.find(
-        message => message.op === "event" && message.replay === true && message.event.id === published.id,
+        message =>
+          message.op === "event" &&
+          message.replay === true &&
+          message.event.id === published.id,
       );
       assert.ok(replay, "persisted event must replay after node restart");
       assert.equal(replay.event.sequence, published.sequence);
       ws.close();
 
-      const response = await fetch(
-        `http://127.0.0.1:${restarted.port}/v1/channels/${encodeURIComponent(channel)}`,
+      response = await fetch(
+        `http://127.0.0.1:${restarted.port}/v1/rooms/${room.room_id}`,
         {
           method: "DELETE",
           headers: authHeaders(),
