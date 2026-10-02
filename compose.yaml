@@ -1,0 +1,110 @@
+name: codestra-realtime
+
+x-runtime-environment: &runtime-environment
+  REALTIME_PERSISTENCE_MODE: postgres
+  REALTIME_BROKER_MODE: nats
+  REALTIME_REQUIRE_DURABLE: "true"
+  REALTIME_DATABASE_URL: postgresql://${POSTGRES_USER:-realtime}:${POSTGRES_PASSWORD:-realtime_local_change_me}@postgres:5432/${POSTGRES_DB:-realtime}
+  REALTIME_NATS_URL: nats://nats:4222
+  REALTIME_NATS_STREAM: REALTIME_EVENTS
+  REALTIME_AUTH_MODE: api_key
+  REALTIME_BOOTSTRAP_API_KEY: ${REALTIME_BOOTSTRAP_API_KEY:-rt_local_bootstrap_change_me}
+  REALTIME_BOOTSTRAP_TENANT: ${REALTIME_BOOTSTRAP_TENANT:-local}
+  REALTIME_NODE_ID: realtime-1
+  HOST: 0.0.0.0
+  PORT: "8787"
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-realtime}
+      POSTGRES_USER: ${POSTGRES_USER:-realtime}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-realtime_local_change_me}
+    volumes:
+      - realtime-postgres:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - realtime-private
+
+  nats:
+    image: nats:2.14.6-alpine
+    restart: unless-stopped
+    command:
+      - --jetstream
+      - --store_dir=/data
+      - --http_port=8222
+    volumes:
+      - realtime-nats:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:8222/healthz >/dev/null || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks:
+      - realtime-private
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    command:
+      - npm
+      - run
+      - db:migrate
+    environment:
+      <<: *runtime-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - realtime-private
+
+  realtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${REALTIME_PORT:-8787}:8787"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8787/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - realtime-private
+
+volumes:
+  realtime-postgres:
+  realtime-nats:
+
+networks:
+  realtime-private:
+    driver: bridge
