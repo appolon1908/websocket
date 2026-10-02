@@ -295,6 +295,83 @@ test("shared broker fans out publish from node 1 to subscriber on node 2", async
   }
 });
 
+test("standalone API-key mode issues, authenticates, rotates, and revokes keys", async () => {
+  const apiEnv = {
+    REALTIME_AUTH_MODE: "api_key",
+    REALTIME_BOOTSTRAP_API_KEY: "bootstrap-local-secret-please-change",
+    REALTIME_BOOTSTRAP_TENANT: "tenant-a",
+  };
+  const running = await startGateway({ env: apiEnv });
+  try {
+    const bootstrapHeaders = {
+      authorization: "Bearer bootstrap-local-secret-please-change",
+      "content-type": "application/json",
+    };
+    let response = await fetch(`http://127.0.0.1:${running.port}/v1/api-keys`, {
+      method: "POST",
+      headers: bootstrapHeaders,
+      body: JSON.stringify({
+        owner: "test-app",
+        permissions: [
+          "channel:create",
+          "channel:read",
+          "channel:publish",
+          "channel:subscribe",
+          "event:publish",
+          "event:read",
+        ],
+      }),
+    });
+    assert.equal(response.status, 201);
+    const issued = await response.json();
+    assert.match(issued.api_key, /^rt_live_[a-f0-9]{16}_/);
+    assert.equal("key_hash" in issued, false);
+
+    response = await fetch(`http://127.0.0.1:${running.port}/v1/api-keys`, {
+      headers: { authorization: "Bearer bootstrap-local-secret-please-change" },
+    });
+    assert.equal(response.status, 200);
+    const list = await response.json();
+    assert.equal(list.items.length, 1);
+    assert.equal("api_key" in list.items[0], false);
+    assert.equal("key_hash" in list.items[0], false);
+
+    response = await fetch(`http://127.0.0.1:${running.port}/v1/channels`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${issued.api_key}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "tenant/tenant-a/api-key-test" }),
+    });
+    assert.equal(response.status, 201);
+
+    response = await fetch(
+      `http://127.0.0.1:${running.port}/v1/api-keys/${issued.id}/rotate`,
+      {
+        method: "POST",
+        headers: { authorization: "Bearer bootstrap-local-secret-please-change" },
+      },
+    );
+    assert.equal(response.status, 201);
+    const rotated = await response.json();
+    assert.notEqual(rotated.api_key, issued.api_key);
+    assert.equal(rotated.rotated_from, issued.id);
+
+    response = await fetch(`http://127.0.0.1:${running.port}/v1/channels`, {
+      headers: { authorization: `Bearer ${issued.api_key}` },
+    });
+    assert.equal(response.status, 401);
+
+    response = await fetch(`http://127.0.0.1:${running.port}/v1/channels`, {
+      headers: { authorization: `Bearer ${rotated.api_key}` },
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await running.close();
+  }
+});
+
 test("legacy http ingest remains compatible and rejects replay", () =>
   withServer(async port => {
     const event = base();

@@ -5,6 +5,7 @@ import { WebSocketServer } from "ws";
 import { MemoryBroker } from "./broker/memory.js";
 import { MemoryEventStore } from "./persistence/memory.js";
 import { createRuntime } from "./runtime.js";
+import { authenticateApiKey, generateApiKey } from "./auth/api-key.js";
 
 export const REALTIME_PROTOCOL = "codestra.realtime.v1";
 export const allowedNamespaces = new Set([
@@ -84,8 +85,13 @@ const roles = {
 
 const b64 = value => Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 const jsonPart = value => JSON.parse(b64(value).toString("utf8"));
-const allows = (user, permission) =>
-  user.roles.some(role => roles[role]?.has("*") || roles[role]?.has(permission));
+const allows = (user, permission) => {
+  const direct = new Set(user.permissions || []);
+  if (direct.has("*") || direct.has(permission)) return true;
+  return (user.roles || []).some(
+    role => roles[role]?.has("*") || roles[role]?.has(permission),
+  );
+};
 const authMode = env =>
   (env.REALTIME_AUTH_MODE || env.MISSION_CONTROL_AUTH_MODE || "disabled").toLowerCase();
 
@@ -126,7 +132,9 @@ export function createJwtVerifier(env = process.env) {
     env.REALTIME_TENANT_CLAIM || env.MISSION_CONTROL_TENANT_CLAIM || "tenant_id";
   let jwks = { expires: 0, keys: new Map() };
 
-  if (mode === "required" && !issuer) throw new Error("REALTIME_JWT_ISSUER required");
+  if (["required", "oidc", "jwt"].includes(mode) && !issuer) {
+    throw new Error("REALTIME_JWT_ISSUER required");
+  }
 
   async function keyFor(kid) {
     if (Date.now() > jwks.expires || !jwks.keys.has(kid)) {
@@ -213,6 +221,29 @@ export function createJwtVerifier(env = process.env) {
       claims,
     };
   };
+}
+
+export function createAuthenticator({ env = process.env, eventStore }) {
+  const mode = authMode(env);
+  if (mode === "api_key" || mode === "apikey") {
+    return async token => {
+      if (!token) throw new Error("missing_bearer_token");
+      return authenticateApiKey({ token, eventStore, env });
+    };
+  }
+  if (mode === "disabled") {
+    return async () => ({
+      sub: "local-development",
+      roles: ["Administrator"],
+      permissions: ["*"],
+      tenant_id: "local",
+      application_id: "local-development",
+    });
+  }
+  if (["required", "oidc", "jwt"].includes(mode)) {
+    return createJwtVerifier(env);
+  }
+  throw new Error(`unsupported REALTIME_AUTH_MODE: ${mode}`);
 }
 
 function validPayload(event) {
@@ -372,6 +403,34 @@ const validChannelName = name =>
   name.length <= 255 &&
   /^[a-zA-Z0-9._\-/:]+$/.test(name);
 
+const API_KEY_PERMISSIONS = new Set([
+  "channel:create",
+  "channel:read",
+  "channel:publish",
+  "channel:subscribe",
+  "event:publish",
+  "event:read",
+  "room:create",
+  "room:join",
+  "stream:create",
+  "stream:publish",
+  "stream:view",
+  "media:publish",
+  "media:view",
+  "admin:read",
+  "admin:write",
+]);
+
+const validApiKeyPermissions = permissions =>
+  Array.isArray(permissions) &&
+  permissions.length > 0 &&
+  permissions.length <= 100 &&
+  permissions.every(
+    permission =>
+      typeof permission === "string" &&
+      (permission === "*" || API_KEY_PERMISSIONS.has(permission)),
+  );
+
 const validCanonicalInput = input =>
   !!input &&
   validChannelName(input.channel) &&
@@ -403,7 +462,7 @@ export function createGateway({
       retentionEvents: Number(env.REALTIME_MEMORY_RETENTION_EVENTS || 1000),
     });
   const broker = providedBroker || new MemoryBroker();
-  const verifyJwt = createJwtVerifier(env);
+  const authenticate = createAuthenticator({ env, eventStore });
   const httpRate = new Bucket(
     Number(env.REALTIME_HTTP_RATE_LIMIT || env.MISSION_CONTROL_EVENT_RATE_LIMIT || 120),
   );
@@ -502,6 +561,27 @@ export function createGateway({
     return event;
   };
 
+  const issueApiKey = async ({ owner, tenantId, permissions, expiresAt = null }) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const material = generateApiKey(env.REALTIME_API_KEY_ENVIRONMENT || "live");
+      try {
+        const metadata = await eventStore.createApiKey({
+          id: material.id,
+          hash: material.hash,
+          prefix: material.prefix,
+          owner,
+          tenantId,
+          permissions,
+          expiresAt,
+        });
+        return { ...metadata, api_key: material.token };
+      } catch (error) {
+        if (error.code !== "23505" && error.message !== "api_key_exists") throw error;
+      }
+    }
+    throw new Error("api_key_generation_failed");
+  };
+
   const server = http.createServer(async (req, res) => {
     const requestId = String(req.headers["x-request-id"] || crypto.randomUUID());
     const url = new URL(req.url || "/", "http://localhost");
@@ -591,7 +671,7 @@ export function createGateway({
 
     let user;
     try {
-      user = await verifyJwt(extractToken(req));
+      user = await authenticate(extractToken(req));
     } catch {
       return sendError(res, 401, "unauthorized", "Authentication failed.", requestId);
     }
@@ -599,6 +679,126 @@ export function createGateway({
     const ip = req.socket.remoteAddress || "unknown";
     if (!httpRate.take(ip)) {
       return sendError(res, 429, "rate_limited", "Too many requests.", requestId);
+    }
+
+    if (path === "/v1/api-keys" && req.method === "GET") {
+      if (!allows(user, "admin:read")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const items = await eventStore.listApiKeys(user.tenant_id);
+      return sendJson(res, 200, { items }, requestId);
+    }
+
+    if (path === "/v1/api-keys" && req.method === "POST") {
+      if (!allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      let body;
+      try {
+        body = await readBody(req, Number(env.REALTIME_HTTP_BODY_MAX || 1048576));
+      } catch (error) {
+        return sendError(
+          res,
+          error.status || 400,
+          error.message,
+          error.message === "invalid_json" ? "Invalid JSON." : "Request body is too large.",
+          requestId,
+        );
+      }
+      if (!validApiKeyPermissions(body.permissions)) {
+        return sendError(
+          res,
+          422,
+          "invalid_permissions",
+          "API key permissions are invalid.",
+          requestId,
+        );
+      }
+      const owner =
+        typeof body.owner === "string" && body.owner.length > 0 && body.owner.length <= 128
+          ? body.owner
+          : user.sub;
+      let expiresAt = null;
+      if (body.expires_at !== undefined && body.expires_at !== null) {
+        const parsed = Date.parse(body.expires_at);
+        if (!Number.isFinite(parsed) || parsed <= Date.now()) {
+          return sendError(
+            res,
+            422,
+            "invalid_expiration",
+            "API key expiration must be in the future.",
+            requestId,
+          );
+        }
+        expiresAt = new Date(parsed).toISOString();
+      }
+      try {
+        const issued = await issueApiKey({
+          owner,
+          tenantId: user.tenant_id,
+          permissions: [...new Set(body.permissions)],
+          expiresAt,
+        });
+        return sendJson(res, 201, issued, requestId);
+      } catch {
+        return sendError(
+          res,
+          503,
+          "persistence_unavailable",
+          "API key persistence is unavailable.",
+          requestId,
+        );
+      }
+    }
+
+    const rotateApiKeyMatch = path.match(/^\/v1\/api-keys\/([a-f0-9]{16})\/rotate$/);
+    if (rotateApiKeyMatch && req.method === "POST") {
+      if (!allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const existing = await eventStore.getApiKeyMetadata(rotateApiKeyMatch[1]);
+      if (!existing || existing.tenant_id !== user.tenant_id) {
+        return sendError(res, 404, "not_found", "API key not found.", requestId);
+      }
+      if (existing.revoked_at) {
+        return sendError(res, 409, "api_key_revoked", "API key is already revoked.", requestId);
+      }
+      try {
+        const issued = await issueApiKey({
+          owner: existing.owner,
+          tenantId: existing.tenant_id,
+          permissions: existing.permissions,
+          expiresAt: existing.expires_at,
+        });
+        await eventStore.revokeApiKey(existing.id, user.tenant_id);
+        return sendJson(
+          res,
+          201,
+          { ...issued, rotated_from: existing.id },
+          requestId,
+        );
+      } catch {
+        return sendError(
+          res,
+          503,
+          "persistence_unavailable",
+          "API key rotation failed.",
+          requestId,
+        );
+      }
+    }
+
+    const apiKeyMatch = path.match(/^\/v1\/api-keys\/([a-f0-9]{16})$/);
+    if (apiKeyMatch && req.method === "DELETE") {
+      if (!allows(user, "admin:write")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      const revoked = await eventStore.revokeApiKey(apiKeyMatch[1], user.tenant_id);
+      if (!revoked) {
+        return sendError(res, 404, "not_found", "API key not found.", requestId);
+      }
+      res.writeHead(204, { "x-request-id": requestId });
+      return res.end();
     }
 
     if (path === "/v1/channels" && req.method === "GET") {
@@ -777,7 +977,7 @@ export function createGateway({
       if (origin && allowed.length && !allowed.includes(origin)) {
         return cb(false, 403, "Forbidden");
       }
-      verifyJwt(extractToken(info.req))
+      authenticate(extractToken(info.req))
         .then(user => {
           info.req.user = user;
           cb(true);

@@ -1,5 +1,17 @@
 import crypto from "node:crypto";
 
+const apiKeyMetadata = record => ({
+  id: record.id,
+  prefix: record.prefix,
+  owner: record.owner,
+  tenant_id: record.tenant_id,
+  permissions: [...record.permissions],
+  created_at: record.created_at,
+  expires_at: record.expires_at,
+  last_used_at: record.last_used_at,
+  revoked_at: record.revoked_at,
+});
+
 export class MemoryEventStore {
   constructor({ retentionEvents = 1000 } = {}) {
     this.kind = "memory";
@@ -9,6 +21,7 @@ export class MemoryEventStore {
     this.eventsById = new Map();
     this.eventsByChannel = new Map();
     this.channelSequence = new Map();
+    this.apiKeys = new Map();
   }
 
   async init() {}
@@ -89,6 +102,60 @@ export class MemoryEventStore {
       items,
       next_cursor: items.length === limit ? String(items.at(-1).sequence) : null,
     };
+  }
+
+  async createApiKey({
+    id,
+    hash,
+    prefix,
+    owner,
+    tenantId,
+    permissions,
+    expiresAt = null,
+  }) {
+    if (this.apiKeys.has(id)) throw new Error("api_key_exists");
+    const record = {
+      id,
+      key_hash: hash,
+      prefix,
+      owner,
+      tenant_id: tenantId,
+      permissions: [...permissions],
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt,
+      last_used_at: null,
+      revoked_at: null,
+    };
+    this.apiKeys.set(id, record);
+    return apiKeyMetadata(record);
+  }
+
+  async listApiKeys(tenantId) {
+    return [...this.apiKeys.values()]
+      .filter(record => record.tenant_id === tenantId)
+      .map(apiKeyMetadata);
+  }
+
+  async getApiKeyMetadata(id) {
+    const record = this.apiKeys.get(id);
+    return record ? apiKeyMetadata(record) : null;
+  }
+
+  async getApiKeyAuthRecord(id) {
+    const record = this.apiKeys.get(id);
+    return record ? { ...record, permissions: [...record.permissions] } : null;
+  }
+
+  async revokeApiKey(id, tenantId) {
+    const record = this.apiKeys.get(id);
+    if (!record || record.tenant_id !== tenantId) return false;
+    if (!record.revoked_at) record.revoked_at = new Date().toISOString();
+    return true;
+  }
+
+  async touchApiKey(id) {
+    const record = this.apiKeys.get(id);
+    if (record) record.last_used_at = new Date().toISOString();
   }
 
   async close() {}

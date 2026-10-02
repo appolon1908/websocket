@@ -20,6 +20,23 @@ function normalizeEvent(row) {
   };
 }
 
+function normalizeApiKey(row, includeHash = false) {
+  if (!row) return null;
+  const value = {
+    id: row.key_id,
+    prefix: row.key_prefix,
+    owner: row.owner,
+    tenant_id: row.tenant_id,
+    permissions: row.permissions || [],
+    created_at: new Date(row.created_at).toISOString(),
+    expires_at: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    last_used_at: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
+    revoked_at: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+  };
+  if (includeHash) value.key_hash = row.key_hash;
+  return value;
+}
+
 export class PostgresEventStore {
   constructor({ connectionString, max = 10, ssl = false } = {}) {
     if (!connectionString) throw new Error("REALTIME_DATABASE_URL required for postgres persistence");
@@ -33,10 +50,11 @@ export class PostgresEventStore {
       `SELECT
         to_regclass('realtime.channels') AS channels,
         to_regclass('realtime.channel_sequences') AS channel_sequences,
-        to_regclass('realtime.events') AS events`,
+        to_regclass('realtime.events') AS events,
+        to_regclass('realtime.api_keys') AS api_keys`,
     );
     const state = result.rows[0] || {};
-    if (!state.channels || !state.channel_sequences || !state.events) {
+    if (!state.channels || !state.channel_sequences || !state.events || !state.api_keys) {
       throw new Error("database_migrations_required");
     }
   }
@@ -188,6 +206,68 @@ export class PostgresEventStore {
       items,
       next_cursor: items.length === limit ? String(items.at(-1).sequence) : null,
     };
+  }
+
+  async createApiKey({
+    id,
+    hash,
+    prefix,
+    owner,
+    tenantId,
+    permissions,
+    expiresAt = null,
+  }) {
+    const result = await this.pool.query(
+      `INSERT INTO realtime.api_keys(
+        key_id, key_hash, key_prefix, owner, tenant_id, permissions, expires_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING *`,
+      [id, hash, prefix, owner, tenantId, JSON.stringify(permissions), expiresAt],
+    );
+    return normalizeApiKey(result.rows[0]);
+  }
+
+  async listApiKeys(tenantId) {
+    const result = await this.pool.query(
+      `SELECT * FROM realtime.api_keys
+       WHERE tenant_id = $1
+       ORDER BY created_at DESC`,
+      [tenantId],
+    );
+    return result.rows.map(row => normalizeApiKey(row));
+  }
+
+  async getApiKeyMetadata(id) {
+    const result = await this.pool.query(
+      "SELECT * FROM realtime.api_keys WHERE key_id = $1",
+      [id],
+    );
+    return normalizeApiKey(result.rows[0]);
+  }
+
+  async getApiKeyAuthRecord(id) {
+    const result = await this.pool.query(
+      "SELECT * FROM realtime.api_keys WHERE key_id = $1",
+      [id],
+    );
+    return normalizeApiKey(result.rows[0], true);
+  }
+
+  async revokeApiKey(id, tenantId) {
+    const result = await this.pool.query(
+      `UPDATE realtime.api_keys
+       SET revoked_at = COALESCE(revoked_at, NOW())
+       WHERE key_id = $1 AND tenant_id = $2`,
+      [id, tenantId],
+    );
+    return result.rowCount === 1;
+  }
+
+  async touchApiKey(id) {
+    await this.pool.query(
+      "UPDATE realtime.api_keys SET last_used_at = NOW() WHERE key_id = $1",
+      [id],
+    );
   }
 
   async close() {
