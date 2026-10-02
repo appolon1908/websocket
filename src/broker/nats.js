@@ -34,7 +34,12 @@ export class NatsJetStreamBroker {
     try {
       await manager.streams.info(streamName);
     } catch (error) {
-      if (error?.code !== "404" && error?.api_error?.code !== 404) {
+      const streamMissing =
+        error?.name === "StreamNotFoundError" ||
+        error?.code === "404" ||
+        error?.api_error?.code === 404 ||
+        /stream not found/i.test(error?.message || "");
+      if (!streamMissing) {
         await connection.close();
         throw error;
       }
