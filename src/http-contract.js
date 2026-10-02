@@ -27,6 +27,7 @@ export const PUBLIC_HTTP_ROUTES = Object.freeze([
   ["DELETE", "/v1/channels/{channel}"],
   ["GET", "/v1/channels/{channel}/events"],
   ["POST", "/v1/events"],
+  ["POST", "/v1/events/batch"],
   ["GET", "/v1/events/{id}"],
   ["POST", "/events"],
 ]);

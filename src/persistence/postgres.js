@@ -55,7 +55,8 @@ export class PostgresEventStore {
         to_regclass('realtime.applications') AS applications,
         to_regclass('realtime.connections') AS connections,
         to_regclass('realtime.rooms') AS rooms,
-        to_regclass('realtime.room_members') AS room_members`,
+        to_regclass('realtime.room_members') AS room_members,
+        to_regclass('realtime.idempotency_records') AS idempotency_records`,
     );
     const state = result.rows[0] || {};
     if (
@@ -66,7 +67,8 @@ export class PostgresEventStore {
       !state.applications ||
       !state.connections ||
       !state.rooms ||
-      !state.room_members
+      !state.room_members ||
+      !state.idempotency_records
     ) {
       throw new Error("database_migrations_required");
     }
@@ -579,6 +581,60 @@ export class PostgresEventStore {
       created_at: new Date(row.created_at).toISOString(),
       members: Array.isArray(members) ? members : [],
     };
+  }
+
+  async claimIdempotency({ tenantId, scope, key, requestHash }) {
+    const inserted = await this.pool.query(
+      `INSERT INTO realtime.idempotency_records(
+        tenant_id, scope, idempotency_key, request_hash
+      ) VALUES ($1,$2,$3,$4)
+      ON CONFLICT (tenant_id, scope, idempotency_key) DO NOTHING
+      RETURNING state`,
+      [tenantId, scope, key, requestHash],
+    );
+    if (inserted.rowCount === 1) return { state: "claimed" };
+
+    const existing = await this.pool.query(
+      `SELECT request_hash, state, response_status, response_body
+       FROM realtime.idempotency_records
+       WHERE tenant_id = $1 AND scope = $2 AND idempotency_key = $3`,
+      [tenantId, scope, key],
+    );
+    const row = existing.rows[0];
+    if (!row) return { state: "processing" };
+    if (row.request_hash !== requestHash) return { state: "conflict" };
+    if (row.state === "completed") {
+      return {
+        state: "replay",
+        response_status: row.response_status,
+        response_body: row.response_body,
+      };
+    }
+    return { state: "processing" };
+  }
+
+  async completeIdempotency({ tenantId, scope, key, responseStatus, responseBody }) {
+    const result = await this.pool.query(
+      `UPDATE realtime.idempotency_records
+       SET state = 'completed',
+           response_status = $4,
+           response_body = $5,
+           completed_at = NOW()
+       WHERE tenant_id = $1 AND scope = $2 AND idempotency_key = $3
+       RETURNING idempotency_key`,
+      [tenantId, scope, key, responseStatus, JSON.stringify(responseBody)],
+    );
+    return result.rowCount === 1;
+  }
+
+  async releaseIdempotency({ tenantId, scope, key }) {
+    const result = await this.pool.query(
+      `DELETE FROM realtime.idempotency_records
+       WHERE tenant_id = $1 AND scope = $2 AND idempotency_key = $3
+         AND state = 'processing'`,
+      [tenantId, scope, key],
+    );
+    return result.rowCount === 1;
   }
 
   async close() {

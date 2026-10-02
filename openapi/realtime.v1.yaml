@@ -405,6 +405,46 @@
             }
           }
         }
+      },
+      "BatchEventRequest": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/EventInput"
+            }
+          }
+        }
+      },
+      "BatchEventResult": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "rejected",
+          "items"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
       }
     }
   },
@@ -637,7 +677,19 @@
           "409": {
             "description": "Already exists"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
       }
     },
     "/v1/channels/{channel}": {
@@ -763,7 +815,19 @@
           "404": {
             "description": "Channel not found"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
       }
     },
     "/v1/events/{id}": {
@@ -870,7 +934,19 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
       }
     },
     "/v1/applications/{id}": {
@@ -1031,7 +1107,19 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
       }
     },
     "/v1/rooms/{id}": {
@@ -1134,6 +1222,61 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/events/batch": {
+      "post": {
+        "summary": "Publish a bounded batch of events",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchEventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "All events accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEventResult"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Batch completed with per-event rejections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEventResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or in-progress request"
+          },
+          "422": {
+            "description": "Invalid batch"
           }
         }
       }

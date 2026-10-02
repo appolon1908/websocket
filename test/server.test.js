@@ -372,6 +372,178 @@ test("standalone API-key mode issues, authenticates, rotates, and revokes keys",
   }
 });
 
+test("idempotency prevents duplicate resources and events and protects batch retries", async () => {
+  await withServer(async port => {
+    const channelBody = { name: "tenant/local/idempotent-orders" };
+    let response = await fetch(`http://127.0.0.1:${port}/v1/channels`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "channel-create-1",
+      },
+      body: JSON.stringify(channelBody),
+    });
+    assert.equal(response.status, 201);
+    const firstChannel = await response.json();
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/channels`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "channel-create-1",
+      },
+      body: JSON.stringify(channelBody),
+    });
+    assert.equal(response.status, 201);
+    assert.equal(response.headers.get("idempotency-replayed"), "true");
+    assert.deepEqual(await response.json(), firstChannel);
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/channels`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "channel-create-1",
+      },
+      body: JSON.stringify({ name: "tenant/local/different-channel" }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, "idempotency_conflict");
+
+    const appRequest = {
+      name: "Idempotent App",
+      permissions: ["channel:read"],
+    };
+    response = await fetch(`http://127.0.0.1:${port}/v1/applications`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "application-create-1",
+      },
+      body: JSON.stringify(appRequest),
+    });
+    assert.equal(response.status, 201);
+    const firstApplication = await response.json();
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/applications`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "application-create-1",
+      },
+      body: JSON.stringify(appRequest),
+    });
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).application_id, firstApplication.application_id);
+
+    const roomRequest = { name: "Idempotent Room", type: "chat" };
+    response = await fetch(`http://127.0.0.1:${port}/v1/rooms`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "room-create-1",
+      },
+      body: JSON.stringify(roomRequest),
+    });
+    assert.equal(response.status, 201);
+    const firstRoom = await response.json();
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/rooms`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "room-create-1",
+      },
+      body: JSON.stringify(roomRequest),
+    });
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).room_id, firstRoom.room_id);
+
+    const eventBody = {
+      channel: channelBody.name,
+      type: "order.updated",
+      data: { order_id: "IDEM-1" },
+    };
+    response = await fetch(`http://127.0.0.1:${port}/v1/events`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "event-publish-1",
+      },
+      body: JSON.stringify(eventBody),
+    });
+    assert.equal(response.status, 202);
+    const firstEvent = await response.json();
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/events`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "event-publish-1",
+      },
+      body: JSON.stringify(eventBody),
+    });
+    assert.equal(response.status, 202);
+    assert.equal(response.headers.get("idempotency-replayed"), "true");
+    const replayedEvent = await response.json();
+    assert.equal(replayedEvent.id, firstEvent.id);
+    assert.equal(replayedEvent.sequence, firstEvent.sequence);
+
+    const batchBody = {
+      events: [
+        {
+          channel: channelBody.name,
+          type: "order.batch",
+          data: { order_id: "BATCH-1" },
+        },
+        {
+          channel: "tenant/local/missing-batch-channel",
+          type: "order.batch",
+          data: { order_id: "BATCH-2" },
+        },
+        {
+          channel: channelBody.name,
+          data: { order_id: "BATCH-3" },
+        },
+      ],
+    };
+    response = await fetch(`http://127.0.0.1:${port}/v1/events/batch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "batch-publish-1",
+      },
+      body: JSON.stringify(batchBody),
+    });
+    assert.equal(response.status, 207);
+    const firstBatch = await response.json();
+    assert.equal(firstBatch.accepted, 1);
+    assert.equal(firstBatch.rejected, 2);
+
+    response = await fetch(`http://127.0.0.1:${port}/v1/events/batch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "batch-publish-1",
+      },
+      body: JSON.stringify(batchBody),
+    });
+    assert.equal(response.status, 207);
+    assert.equal(response.headers.get("idempotency-replayed"), "true");
+    assert.deepEqual(await response.json(), firstBatch);
+
+    const history = await (
+      await fetch(
+        `http://127.0.0.1:${port}/v1/channels/${encodeURIComponent(channelBody.name)}/events?after=0&limit=10`,
+      )
+    ).json();
+    assert.equal(history.items.length, 2);
+    assert.deepEqual(
+      history.items.map(item => item.sequence),
+      [1, 2],
+    );
+  });
+});
+
 test("applications, connections, presence, and rooms form a standalone collaboration flow", async () => {
   await withServer(async port => {
     let response = await fetch(`http://127.0.0.1:${port}/v1/applications`, {

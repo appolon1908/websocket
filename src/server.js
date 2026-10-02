@@ -105,10 +105,11 @@ const extractToken = req => {
   return bearer ? bearer.slice(7) : null;
 };
 
-const sendJson = (res, status, body, requestId) => {
+const sendJson = (res, status, body, requestId, extraHeaders = {}) => {
   res.writeHead(status, {
     "content-type": "application/json",
     "x-request-id": requestId,
+    ...extraHeaders,
   });
   res.end(JSON.stringify(body));
 };
@@ -431,6 +432,30 @@ const validApiKeyPermissions = permissions =>
       (permission === "*" || API_KEY_PERMISSIONS.has(permission)),
   );
 
+const stableJson = value => {
+  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]";
+  if (value && typeof value === "object") {
+    return (
+      "{" +
+      Object.keys(value)
+        .sort()
+        .map(key => JSON.stringify(key) + ":" + stableJson(value[key]))
+        .join(",") +
+      "}"
+    );
+  }
+  return JSON.stringify(value);
+};
+
+const idempotencyRequestHash = body =>
+  crypto.createHash("sha256").update(stableJson(body)).digest("hex");
+
+const validIdempotencyKey = key =>
+  typeof key === "string" &&
+  key.length >= 1 &&
+  key.length <= 200 &&
+  /^[A-Za-z0-9._:-]+$/.test(key);
+
 const validCanonicalInput = input =>
   !!input &&
   validChannelName(input.channel) &&
@@ -580,6 +605,85 @@ export function createGateway({
       }
     }
     throw new Error("api_key_generation_failed");
+  };
+
+  const beginIdempotency = async ({ req, res, user, scope, body, requestId }) => {
+    const key = req.headers["idempotency-key"];
+    if (key === undefined) return { active: false };
+    if (!validIdempotencyKey(key)) {
+      sendError(
+        res,
+        422,
+        "invalid_idempotency_key",
+        "Idempotency-Key is invalid.",
+        requestId,
+      );
+      return null;
+    }
+    const requestHash = idempotencyRequestHash(body);
+    const claim = await eventStore.claimIdempotency({
+      tenantId: user.tenant_id,
+      scope,
+      key,
+      requestHash,
+    });
+    if (claim.state === "conflict") {
+      sendError(
+        res,
+        409,
+        "idempotency_conflict",
+        "Idempotency-Key was already used with a different request.",
+        requestId,
+      );
+      return null;
+    }
+    if (claim.state === "processing") {
+      sendError(
+        res,
+        409,
+        "idempotency_in_progress",
+        "A request with this Idempotency-Key is already in progress.",
+        requestId,
+      );
+      return null;
+    }
+    if (claim.state === "replay") {
+      sendJson(
+        res,
+        claim.response_status,
+        claim.response_body,
+        requestId,
+        { "idempotency-replayed": "true" },
+      );
+      return null;
+    }
+    return { active: true, key };
+  };
+
+  const completeIdempotency = async ({
+    context,
+    user,
+    scope,
+    status,
+    body,
+  }) => {
+    if (!context?.active) return;
+    await eventStore.completeIdempotency({
+      tenantId: user.tenant_id,
+      scope,
+      key: context.key,
+      responseStatus: status,
+      responseBody: body,
+    });
+  };
+
+  const releaseIdempotency = async ({ context, user, scope }) => {
+    if (!context?.active) return;
+    await eventStore.releaseIdempotency({
+      tenantId: user.tenant_id,
+      scope,
+      key: context.key,
+    });
   };
 
   const server = http.createServer(async (req, res) => {
@@ -746,6 +850,15 @@ export function createGateway({
         body.rate_limits && typeof body.rate_limits === "object" && !Array.isArray(body.rate_limits)
           ? body.rate_limits
           : {};
+      const idempotency = await beginIdempotency({
+        req,
+        res,
+        user,
+        scope: "POST /v1/applications",
+        body,
+        requestId,
+      });
+      if (!idempotency) return;
       const applicationId = "app_" + crypto.randomBytes(12).toString("hex");
       try {
         const application = await eventStore.createApplication({
@@ -755,6 +868,13 @@ export function createGateway({
           permissions: [...new Set(permissions)],
           rateLimits,
           allowedOrigins: [...new Set(allowedOrigins)],
+        });
+        await completeIdempotency({
+          context: idempotency,
+          user,
+          scope: "POST /v1/applications",
+          status: 201,
+          body: application,
         });
         return sendJson(res, 201, application, requestId);
       } catch {
@@ -856,6 +976,15 @@ export function createGateway({
       ) {
         return sendError(res, 422, "invalid_room", "Room definition is invalid.", requestId);
       }
+      const idempotency = await beginIdempotency({
+        req,
+        res,
+        user,
+        scope: "POST /v1/rooms",
+        body,
+        requestId,
+      });
+      if (!idempotency) return;
       const roomId = crypto.randomUUID();
       const channel = `tenant/${user.tenant_id}/rooms/${roomId}`;
       try {
@@ -866,6 +995,13 @@ export function createGateway({
           type: body.type,
           createdBy: user.sub,
           channel,
+        });
+        await completeIdempotency({
+          context: idempotency,
+          user,
+          scope: "POST /v1/rooms",
+          status: 201,
+          body: room,
         });
         return sendJson(res, 201, room, requestId);
       } catch {
@@ -1078,11 +1214,27 @@ export function createGateway({
           requestId,
         );
       }
+      const idempotency = await beginIdempotency({
+        req,
+        res,
+        user,
+        scope: "POST /v1/channels",
+        body,
+        requestId,
+      });
+      if (!idempotency) return;
       try {
         const channel = await eventStore.createChannel({
           name: body.name,
           tenantId: user.tenant_id,
           retention: body.retention || (eventStore.durable ? "default" : "memory"),
+        });
+        await completeIdempotency({
+          context: idempotency,
+          user,
+          scope: "POST /v1/channels",
+          status: 201,
+          body: channel,
         });
         return sendJson(res, 201, channel, requestId);
       } catch (error) {
@@ -1149,21 +1301,144 @@ export function createGateway({
           requestId,
         );
       }
+      if (!validCanonicalInput(body)) {
+        return sendError(res, 422, "invalid_event", "Event payload is invalid.", requestId);
+      }
       if (!authorizeChannel(user, body.channel, "channel:publish")) {
         return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
       }
+      const channel = await eventStore.getChannel(body.channel);
+      if (!channel) {
+        return sendError(res, 404, "channel_not_found", "Channel not found.", requestId);
+      }
+      const idempotency = await beginIdempotency({
+        req,
+        res,
+        user,
+        scope: "POST /v1/events",
+        body,
+        requestId,
+      });
+      if (!idempotency) return;
       try {
         const event = await publishCanonical(body, user);
+        await completeIdempotency({
+          context: idempotency,
+          user,
+          scope: "POST /v1/events",
+          status: 202,
+          body: event,
+        });
         return sendJson(res, 202, event, requestId);
-      } catch (error) {
-        if (error.code === "invalid_event") {
-          return sendError(res, 422, "invalid_event", "Event payload is invalid.", requestId);
-        }
-        if (error.code === "channel_not_found") {
-          return sendError(res, 404, "channel_not_found", "Channel not found.", requestId);
-        }
-        return sendError(res, 503, "runtime_unavailable", "Realtime runtime is unavailable.", requestId);
+      } catch {
+        return sendError(
+          res,
+          503,
+          "runtime_unavailable",
+          "Realtime runtime is unavailable.",
+          requestId,
+        );
       }
+    }
+
+    if (path === "/v1/events/batch" && req.method === "POST") {
+      if (!allows(user, "event:publish")) {
+        return sendError(res, 403, "forbidden", "Request is not permitted.", requestId);
+      }
+      let body;
+      try {
+        body = await readBody(req, Number(env.REALTIME_HTTP_BODY_MAX || 1048576));
+      } catch (error) {
+        return sendError(
+          res,
+          error.status || 400,
+          error.message,
+          error.message === "invalid_json" ? "Invalid JSON." : "Request body is too large.",
+          requestId,
+        );
+      }
+      const maxBatch = Math.min(
+        Math.max(Number(env.REALTIME_BATCH_MAX_EVENTS || 100), 1),
+        500,
+      );
+      if (!Array.isArray(body.events) || body.events.length < 1 || body.events.length > maxBatch) {
+        return sendError(
+          res,
+          422,
+          "invalid_batch",
+          `Batch must contain between 1 and ${maxBatch} events.`,
+          requestId,
+        );
+      }
+
+      const idempotency = await beginIdempotency({
+        req,
+        res,
+        user,
+        scope: "POST /v1/events/batch",
+        body,
+        requestId,
+      });
+      if (!idempotency) return;
+
+      const items = [];
+      let accepted = 0;
+      let rejected = 0;
+      for (let index = 0; index < body.events.length; index += 1) {
+        const input = body.events[index];
+        if (!validCanonicalInput(input)) {
+          rejected += 1;
+          items.push({
+            index,
+            status: "rejected",
+            error: { code: "invalid_event", message: "Event payload is invalid." },
+          });
+          continue;
+        }
+        if (!authorizeChannel(user, input.channel, "channel:publish")) {
+          rejected += 1;
+          items.push({
+            index,
+            status: "rejected",
+            error: { code: "forbidden", message: "Publish is not permitted." },
+          });
+          continue;
+        }
+        const channel = await eventStore.getChannel(input.channel);
+        if (!channel) {
+          rejected += 1;
+          items.push({
+            index,
+            status: "rejected",
+            error: { code: "channel_not_found", message: "Channel not found." },
+          });
+          continue;
+        }
+        try {
+          const event = await publishCanonical(input, user);
+          accepted += 1;
+          items.push({ index, status: "accepted", event });
+        } catch {
+          return sendError(
+            res,
+            503,
+            "runtime_unavailable",
+            "Realtime runtime is unavailable while processing the batch.",
+            requestId,
+          );
+        }
+      }
+
+      const responseBody = { accepted, rejected, items };
+      const status = rejected > 0 ? 207 : 202;
+      await completeIdempotency({
+        context: idempotency,
+        user,
+        scope: "POST /v1/events/batch",
+        status,
+        body: responseBody,
+      });
+      return sendJson(res, status, responseBody, requestId);
     }
 
     const eventMatch = path.match(/^\/v1\/events\/([0-9a-f-]+)$/i);

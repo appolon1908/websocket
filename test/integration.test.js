@@ -114,14 +114,18 @@ test(
       assert.equal(presence.count, 1);
       assert.equal(presence.items[0].connection_id, connectionId);
 
+      const eventRequest = {
+        channel: room.channel,
+        type: "integration.cross-node",
+        data: { source: "node-1" },
+      };
       response = await fetch(`http://127.0.0.1:${node1.port}/v1/events`, {
         method: "POST",
-        headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({
-          channel: room.channel,
-          type: "integration.cross-node",
-          data: { source: "node-1" },
+        headers: authHeaders({
+          "content-type": "application/json",
+          "idempotency-key": `integration-event-${suffix}`,
         }),
+        body: JSON.stringify(eventRequest),
       });
       assert.equal(response.status, 202);
       published = await response.json();
@@ -133,6 +137,28 @@ test(
             message.event.id === published.id &&
             message.event.data.source === "node-1",
         ),
+      );
+      const firstDeliveryCount = received.filter(
+        message => message.op === "event" && message.event.id === published.id,
+      ).length;
+
+      response = await fetch(`http://127.0.0.1:${node1.port}/v1/events`, {
+        method: "POST",
+        headers: authHeaders({
+          "content-type": "application/json",
+          "idempotency-key": `integration-event-${suffix}`,
+        }),
+        body: JSON.stringify(eventRequest),
+      });
+      assert.equal(response.status, 202);
+      assert.equal(response.headers.get("idempotency-replayed"), "true");
+      assert.equal((await response.json()).id, published.id);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(
+        received.filter(
+          message => message.op === "event" && message.event.id === published.id,
+        ).length,
+        firstDeliveryCount,
       );
 
       response = await fetch(
@@ -159,6 +185,7 @@ test(
       assert.equal((await response.json()).channel, room.channel);
 
       const { ws, received } = await openSocket(restarted.port);
+      await waitUntil(() => received.some(message => message.op === "connected"));
       ws.send(JSON.stringify({ op: "resume", channel: room.channel, after: 0 }));
       await waitUntil(() => received.some(message => message.op === "resumed"));
       const replay = received.find(

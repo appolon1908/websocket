@@ -66,6 +66,7 @@ export class MemoryEventStore {
     this.applications = new Map();
     this.connections = new Map();
     this.rooms = new Map();
+    this.idempotency = new Map();
   }
 
   async init() {}
@@ -377,6 +378,50 @@ export class MemoryEventStore {
     if (!room || room.tenant_id !== tenantId) return null;
     room.members = room.members.filter(member => member !== principalId);
     return cloneRoom(room);
+  }
+
+  async claimIdempotency({ tenantId, scope, key, requestHash }) {
+    const id = `${tenantId}\n${scope}\n${key}`;
+    const existing = this.idempotency.get(id);
+    if (!existing) {
+      this.idempotency.set(id, {
+        tenant_id: tenantId,
+        scope,
+        key,
+        request_hash: requestHash,
+        state: "processing",
+        response_status: null,
+        response_body: null,
+      });
+      return { state: "claimed" };
+    }
+    if (existing.request_hash !== requestHash) return { state: "conflict" };
+    if (existing.state === "completed") {
+      return {
+        state: "replay",
+        response_status: existing.response_status,
+        response_body: existing.response_body,
+      };
+    }
+    return { state: "processing" };
+  }
+
+  async completeIdempotency({ tenantId, scope, key, responseStatus, responseBody }) {
+    const id = `${tenantId}\n${scope}\n${key}`;
+    const existing = this.idempotency.get(id);
+    if (!existing) return false;
+    existing.state = "completed";
+    existing.response_status = responseStatus;
+    existing.response_body = structuredClone(responseBody);
+    return true;
+  }
+
+  async releaseIdempotency({ tenantId, scope, key }) {
+    const id = `${tenantId}\n${scope}\n${key}`;
+    const existing = this.idempotency.get(id);
+    if (!existing || existing.state === "completed") return false;
+    this.idempotency.delete(id);
+    return true;
   }
 
   async close() {}
