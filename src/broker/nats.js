@@ -63,6 +63,7 @@ export class NatsJetStreamBroker {
 
   async subscribe(channel, handler) {
     const subscription = this.connection.subscribe(this.subject(channel));
+    await this.connection.flush();
     let active = true;
     const task = (async () => {
       try {
