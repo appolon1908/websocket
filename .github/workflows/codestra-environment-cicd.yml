@@ -1,0 +1,77 @@
+name: Codestra Environment CI/CD
+
+on:
+  push:
+    branches: [development, testing, staging, production]
+  pull_request:
+    branches: [development, testing, staging, production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codestra-env-${{ github.repository }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Validate source and environment contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git whitespace validation
+        run: git diff --check
+
+      - name: Validate JSON and Python syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import py_compile
+
+          root = pathlib.Path(".")
+          for path in root.rglob("*.json"):
+              if any(part in {".git", "node_modules", ".venv", "vendor"} for part in path.parts):
+                  continue
+              with path.open("r", encoding="utf-8") as handle:
+                  json.load(handle)
+
+          for path in root.rglob("*.py"):
+              if any(part in {".git", "node_modules", ".venv", "vendor"} for part in path.parts):
+                  continue
+              py_compile.compile(str(path), doraise=True)
+          PY
+
+      - name: Record immutable candidate
+        shell: bash
+        run: |
+          mkdir -p .codestra-ci
+          printf 'repository=%s\nref=%s\nsha=%s\nevent=%s\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" \
+            > .codestra-ci/candidate.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codestra-candidate-${{ github.sha }}
+          path: .codestra-ci/candidate.txt
+          retention-days: 14
+
+  deploy:
+    name: Gated middleware-host deployment
+    needs: ci
+    if: github.event_name == 'push' && vars.CODESTRA_DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64, codestra-middleware]
+    environment: ${{ github.ref_name }}
+    steps:
+      - name: Deploy exact certified SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/local/sbin/codestra-deploy-from-worktree \
+            "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
