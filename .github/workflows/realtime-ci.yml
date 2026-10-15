@@ -1,0 +1,87 @@
+name: realtime-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'impl/**'
+
+permissions:
+  contents: read
+
+jobs:
+  unit-contract-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: JavaScript syntax
+        run: find src scripts test -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Unit and protocol tests
+        run: npm test
+      - name: OpenAPI parity
+        run: npm run contract:check
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: Compose validation
+        run: docker compose config --quiet
+      - name: Production image build
+        run: docker build --tag codestra-realtime:ci .
+
+  postgres-nats-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Start PostgreSQL 18 and NATS JetStream
+        run: |
+          docker run -d --name realtime-postgres \
+            -e POSTGRES_DB=realtime \
+            -e POSTGRES_USER=realtime \
+            -e POSTGRES_PASSWORD=realtime_ci_password \
+            -p 5432:5432 postgres:18.6-alpine
+          docker run -d --name realtime-nats \
+            -p 4222:4222 -p 8222:8222 \
+            nats:2.14.6-alpine --jetstream --http_port=8222
+          for i in $(seq 1 60); do
+            docker exec realtime-postgres pg_isready -U realtime -d realtime && break
+            sleep 1
+          done
+          for i in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:8222/healthz >/dev/null && break
+            sleep 1
+          done
+          docker exec realtime-postgres pg_isready -U realtime -d realtime
+          curl --fail --silent http://127.0.0.1:8222/healthz >/dev/null
+      - name: Apply and verify migrations
+        env:
+          REALTIME_DATABASE_URL: postgresql://realtime:realtime_ci_password@127.0.0.1:5432/realtime
+        run: |
+          npm run db:migrate
+          npm run db:status
+      - name: Durable restart and multi-node certification
+        env:
+          REALTIME_INTEGRATION: '1'
+          REALTIME_DATABASE_URL: postgresql://realtime:realtime_ci_password@127.0.0.1:5432/realtime
+          REALTIME_NATS_URL: nats://127.0.0.1:4222
+          REALTIME_BOOTSTRAP_API_KEY: realtime_ci_bootstrap_secret
+          REALTIME_BOOTSTRAP_TENANT: integration
+        run: npm run test:integration
+      - name: Runtime logs on failure
+        if: failure()
+        run: |
+          docker logs realtime-postgres || true
+          docker logs realtime-nats || true
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f realtime-postgres realtime-nats || true

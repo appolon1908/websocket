@@ -1,0 +1,1285 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Codestra Realtime API",
+    "version": "2.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "request_id"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Channel": {
+        "type": "object",
+        "required": [
+          "name",
+          "tenant_id",
+          "retention",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "retention": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EventInput": {
+        "type": "object",
+        "required": [
+          "channel",
+          "type",
+          "data"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "data": {},
+          "correlation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "causation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "id",
+          "sequence",
+          "channel",
+          "type",
+          "timestamp",
+          "source",
+          "tenant_id",
+          "data"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "channel": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "causation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trace_id": {
+            "type": "string"
+          },
+          "data": {}
+        }
+      },
+      "ApiKeyMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "prefix",
+          "owner",
+          "tenant_id",
+          "permissions",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKeyIssued": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApiKeyMetadata"
+          },
+          {
+            "type": "object",
+            "required": [
+              "api_key"
+            ],
+            "properties": {
+              "api_key": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "Application": {
+        "type": "object",
+        "required": [
+          "application_id",
+          "name",
+          "tenant_id",
+          "status",
+          "permissions",
+          "rate_limits",
+          "allowed_origins",
+          "created_at"
+        ],
+        "properties": {
+          "application_id": {
+            "type": "string",
+            "pattern": "^app_[a-f0-9]{24}$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rate_limits": {
+            "type": "object"
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "principal_id",
+          "tenant_id",
+          "connected_at",
+          "last_seen",
+          "status",
+          "subscriptions"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "application_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "connected_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "disconnected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "remote_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscriptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bytes_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_out": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "messages_in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "messages_out": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "Room": {
+        "type": "object",
+        "required": [
+          "room_id",
+          "tenant_id",
+          "name",
+          "type",
+          "channel",
+          "created_by",
+          "created_at",
+          "members"
+        ],
+        "properties": {
+          "room_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "voice",
+              "video",
+              "collaboration"
+            ]
+          },
+          "channel": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BatchEventRequest": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/EventInput"
+            }
+          }
+        }
+      },
+      "BatchEventResult": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "rejected",
+          "items"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "security": [],
+        "summary": "Liveness",
+        "responses": {
+          "200": {
+            "description": "Process is live"
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "security": [],
+        "summary": "Readiness",
+        "responses": {
+          "200": {
+            "description": "Enabled dependencies are ready"
+          },
+          "503": {
+            "description": "Dependency unavailable"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "security": [],
+        "deprecated": true,
+        "summary": "Legacy health compatibility",
+        "responses": {
+          "200": {
+            "description": "Legacy health"
+          }
+        }
+      }
+    },
+    "/v1/system/info": {
+      "get": {
+        "security": [],
+        "summary": "System information",
+        "responses": {
+          "200": {
+            "description": "System information"
+          }
+        }
+      }
+    },
+    "/v1/system/capabilities": {
+      "get": {
+        "security": [],
+        "summary": "Capabilities",
+        "responses": {
+          "200": {
+            "description": "Capability flags"
+          }
+        }
+      }
+    },
+    "/v1/system/version": {
+      "get": {
+        "security": [],
+        "summary": "Version",
+        "responses": {
+          "200": {
+            "description": "Version"
+          }
+        }
+      }
+    },
+    "/v1/api-keys": {
+      "get": {
+        "summary": "List API keys",
+        "responses": {
+          "200": {
+            "description": "API key metadata"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create API key",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "permissions"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string"
+                  },
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "expires_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "API key issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyIssued"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16}$"
+          }
+        }
+      ],
+      "delete": {
+        "summary": "Revoke API key",
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{id}/rotate": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16}$"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Rotate API key",
+        "responses": {
+          "201": {
+            "description": "Replacement API key issued"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Already revoked"
+          }
+        }
+      }
+    },
+    "/v1/channels": {
+      "get": {
+        "summary": "List channels",
+        "responses": {
+          "200": {
+            "description": "Channels"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create channel",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Channel created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already exists"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/channels/{channel}": {
+      "parameters": [
+        {
+          "name": "channel",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get channel",
+        "responses": {
+          "200": {
+            "description": "Channel"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete channel",
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/channels/{channel}/events": {
+      "parameters": [
+        {
+          "name": "channel",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Read channel event history",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event history"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "post": {
+        "summary": "Publish event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Event accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/events/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get event",
+        "responses": {
+          "200": {
+            "description": "Event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/events": {
+      "post": {
+        "deprecated": true,
+        "summary": "Legacy Mission Control event ingest",
+        "responses": {
+          "202": {
+            "description": "Accepted"
+          },
+          "409": {
+            "description": "Replay rejected"
+          },
+          "422": {
+            "description": "Invalid legacy event"
+          }
+        }
+      }
+    },
+    "/v1/applications": {
+      "get": {
+        "summary": "List applications",
+        "responses": {
+          "200": {
+            "description": "Applications"
+          }
+        }
+      },
+      "post": {
+        "summary": "Register application",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rate_limits": {
+                    "type": "object"
+                  },
+                  "allowed_origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Application registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Application"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/applications/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^app_[a-f0-9]{24}$"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get application",
+        "responses": {
+          "200": {
+            "description": "Application",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Application"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/connections": {
+      "get": {
+        "summary": "List connections",
+        "parameters": [
+          {
+            "name": "active",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connections"
+          }
+        }
+      }
+    },
+    "/v1/connections/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get connection",
+        "responses": {
+          "200": {
+            "description": "Connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Terminate connection",
+        "responses": {
+          "204": {
+            "description": "Terminated"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/presence/{channel}": {
+      "parameters": [
+        {
+          "name": "channel",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get channel presence",
+        "responses": {
+          "200": {
+            "description": "Active channel presence"
+          },
+          "404": {
+            "description": "Channel not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms": {
+      "post": {
+        "summary": "Create room",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "type"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "chat",
+                      "voice",
+                      "video",
+                      "collaboration"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Room created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/rooms/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get room",
+        "responses": {
+          "200": {
+            "description": "Room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete room",
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms/{id}/join": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Join room",
+        "responses": {
+          "200": {
+            "description": "Room membership updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/rooms/{id}/leave": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Leave room",
+        "responses": {
+          "200": {
+            "description": "Room membership updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Room"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/v1/events/batch": {
+      "post": {
+        "summary": "Publish a bounded batch of events",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchEventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "All events accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEventResult"
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Batch completed with per-event rejections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEventResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict or in-progress request"
+          },
+          "422": {
+            "description": "Invalid batch"
+          }
+        }
+      }
+    }
+  }
+}

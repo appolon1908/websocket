@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codestra.example/schemas/realtime.v1.schema.json",
+  "title": "Codestra Realtime WebSocket Protocol v1",
+  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/subscribe"
+    },
+    {
+      "$ref": "#/$defs/unsubscribe"
+    },
+    {
+      "$ref": "#/$defs/publish"
+    },
+    {
+      "$ref": "#/$defs/resume"
+    },
+    {
+      "$ref": "#/$defs/ack"
+    },
+    {
+      "$ref": "#/$defs/ping"
+    }
+  ],
+  "$defs": {
+    "channel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[a-zA-Z0-9._\\\\-/:]+$"
+    },
+    "subscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "channel"
+      ],
+      "properties": {
+        "op": {
+          "const": "subscribe"
+        },
+        "channel": {
+          "$ref": "#/$defs/channel"
+        }
+      }
+    },
+    "unsubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "channel"
+      ],
+      "properties": {
+        "op": {
+          "const": "unsubscribe"
+        },
+        "channel": {
+          "$ref": "#/$defs/channel"
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "op",
+        "channel",
+        "type",
+        "data"
+      ],
+      "properties": {
+        "op": {
+          "const": "publish"
+        },
+        "channel": {
+          "$ref": "#/$defs/channel"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "data": {}
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "channel",
+        "after"
+      ],
+      "properties": {
+        "op": {
+          "const": "resume"
+        },
+        "channel": {
+          "$ref": "#/$defs/channel"
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "event_id"
+      ],
+      "properties": {
+        "op": {
+          "const": "ack"
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "ping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "op": {
+          "const": "ping"
+        }
+      }
+    }
+  }
+}
